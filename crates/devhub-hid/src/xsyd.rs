@@ -191,13 +191,11 @@ pub struct XsydDriver {
     axis_cache: AxisCache,
     /// 自分が直近で投げた `[4,3,kind,row]` の時刻 — 外部トラフィック検出用。
     axis_self: Mutex<HashMap<(u8, u8), Instant>>,
+    /// 自分が直近で投げたコマンド (grp,sub) の時刻 — 非軸フレームが
+    /// 「他人の応答」か「自分の応答」かを区別するために使う。
+    cmd_self: Mutex<HashMap<(u8, u8), Instant>>,
     /// 外部トラフィックを検出したら要求を休む期限 (受動モード)。
     axis_passive: Mutex<Instant>,
-    /// デバイス側の軸ストリームが武装中か。実機検証: 1 回の `[4,3]` で
-    /// ~28fps の自律配信が始まり 150 秒以上止まらず、任意の非軸コマンドで
-    /// 解除される。公式 HUB は「送信後の最初のフレーム」を応答とみなすため、
-    /// 武装中は公式の全読み出しが破壊される — 外部検出時は即解除する。
-    axis_armed: Mutex<bool>,
 }
 
 /// `2,5` ポーリング wire code → ラベル (SDK Fn)。
@@ -242,8 +240,8 @@ pub fn open(dev: hidapi::HidDevice, info: DeviceInfo) -> HubResult<XsydDriver> {
         dd_pre: Mutex::new(BTreeMap::new()),
         axis_cache: Mutex::new(HashMap::new()),
         axis_self: Mutex::new(HashMap::new()),
+        cmd_self: Mutex::new(HashMap::new()),
         axis_passive: Mutex::new(Instant::now() - Duration::from_secs(1)),
-        axis_armed: Mutex::new(false),
     };
     // [1,3] DeviceFeature: r[2]=axisType(機種バリアント enum、磁気=2), r[3]=接続,
     // r[4]={rgb,knob}, r[5]={画面,haptic,numpad,dotMatrix}。レイヤー数ではない。
@@ -343,6 +341,11 @@ impl XsydDriver {
         let n = args.len().min(62);
         w[2..2 + n].copy_from_slice(&args[..n]);
         self.ch.send(&w)?;
+        // 自分の送信を記録 — drain で「他人の応答」と区別するために使う。
+        self.cmd_self
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert((group, sub), Instant::now());
 
         let wait_ms = if probing { PROBE_WAIT_MS } else { DEADLINE_MS };
         let deadline = Instant::now() + Duration::from_millis(wait_ms);
@@ -748,48 +751,43 @@ impl XsydDriver {
                     .get(&(b[2], b[3]))
                     .is_some_and(|t| t.elapsed() < Duration::from_millis(500));
                 saw_ours |= ours;
-            } else if (1..=13).contains(&b[0]) && b.get(1) != Some(&0xFF) {
-                // 軸フレーム以外の既知応答 — OBS 経路では軸要求しか出さない
-                // ので、これは別クライアントのコマンド応答。
+            } else if self.is_foreign_cmd(&b) {
+                // 軸フレーム以外の他人のコマンド応答 (自分の最近の
+                // 送信に対応するものは除外済み)。
                 saw_foreign = true;
             }
             if Instant::now() >= deadline {
                 break;
             }
         }
-        // 非軸フレーム = 他人のコマンド応答 → そのコマンド自体がデバイス側の
-        // ストリームを解除したはずだが、確実を期してこちらからも解除コマンドを
-        // 送る (1 回だけ、軽い読み出し)。軸フレームだけの外部検出は他人の
-        // ストリームに相乗りするので解除しない。
-        if saw_foreign {
-            self.note_foreign(true);
-            return true;
-        }
-        if saw_any && !saw_ours {
-            self.note_foreign(false);
+        // 外部検出で受動化。デバイス側のストリームは他人のコマンドが既に
+        // 解除している (任意の非軸コマンドで止まる) ので、こちらからは
+        // 何も送らない — 送ればその応答が公式のキューに混ざって逆効果。
+        if saw_foreign || (saw_any && !saw_ours) {
+            self.note_foreign();
             return true;
         }
         false
     }
 
-    /// 外部トラフィックを記録: 受動モードを延長し、`disarm` 時は武装中の
-    /// 軸ストリームを非軸コマンドで解除する (実機検証: 任意の非軸コマンドで
-    /// ~28fps の自律配信が止まる)。武装したままだと公式 HUB の読み出しが
-    /// 全滅するため。
-    fn note_foreign(&self, disarm: bool) {
+    /// 非軸フレームが「他人のコマンド応答」か。既知 group・エラー応答
+    /// 以外・かつ自分が最近送った同 (grp,sub) の応答ではないもの。
+    fn is_foreign_cmd(&self, b: &[u8]) -> bool {
+        (1..=13).contains(&b[0])
+            && b.get(1) != Some(&0xFF)
+            && !(b[0] == grp::PERFORMANCE && b[1] == sub::AXIS_DATA)
+            && self
+                .cmd_self
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(&(b[0], b[1]))
+                .is_none_or(|t| t.elapsed() > Duration::from_millis(800))
+    }
+
+    /// 外部トラフィックを記録して受動モードを延長する。
+    fn note_foreign(&self) {
         *self.axis_passive.lock().unwrap_or_else(|p| p.into_inner()) =
             Instant::now() + Duration::from_secs(8);
-        let was_armed = disarm
-            && std::mem::replace(
-                &mut *self.axis_armed.lock().unwrap_or_else(|p| p.into_inner()),
-                false,
-            );
-        if was_armed {
-            // [4,1,1,1] = GetPerformance(row1,col1) — 無害な通常読み出し。
-            self.ch
-                .send(&[grp::PERFORMANCE, sub::GET_PERF, 1, 1])
-                .ok();
-        }
     }
 
     /// `[4,3,kind,row]` → 30×u16 LE (mm×1000)。kind: axis::* (ADC=0,Route=1,Calibrate=2,KeyStatus=3)。
@@ -816,8 +814,6 @@ impl XsydDriver {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .insert((kind, row), Instant::now());
-        // 有効な軸要求はデバイス側の自律ストリームを武装する。
-        *self.axis_armed.lock().unwrap_or_else(|p| p.into_inner()) = true;
         let wait_ms = if probing { PROBE_WAIT_MS } else { DEADLINE_MS };
         let deadline = Instant::now() + Duration::from_millis(wait_ms);
         while Instant::now() < deadline {
@@ -845,9 +841,10 @@ impl XsydDriver {
                     {
                         return Err(HubError::Unsupported("command"));
                     }
-                    if (1..=13).contains(&b[0]) {
-                        // 軸以外の既知応答 = 別クライアントの会話 → 受動化+解除。
-                        self.note_foreign(true);
+                    if self.is_foreign_cmd(&b) {
+                        // 他人のコマンド応答 → 受動化 (デバイス側はその
+                        // コマンドで既に解除済み、こちらからは送らない)。
+                        self.note_foreign();
                     }
                 }
                 Err(HubError::Protocol(_)) => {}
@@ -3066,13 +3063,26 @@ mod tests {
         let mut f = vec![3u8, 1];
         f.resize(64, 0);
         d.ch.mock_reply(&f);
-        *d.axis_armed.lock().unwrap() = true;
         assert!(d.drain_axis(5));
         assert!(*d.axis_passive.lock().unwrap() > Instant::now());
-        // 武装中だったので解除コマンド [4,1,1,1] が一度だけ出ている。
-        let sent = d.ch.mock_sent();
-        assert!(sent.iter().any(|s| s.as_slice() == [4, 1, 1, 1]));
-        assert!(!*d.axis_armed.lock().unwrap());
+        // 他人のコマンドがデバイス側ストリームを解除するので、
+        // こちらからは何も送らない。
+        assert!(d.ch.mock_sent().is_empty());
+    }
+
+    #[test]
+    fn drain_ignores_own_command_responses() {
+        let d = mock_driver();
+        // 自分が [3,1] を直前に送っていた状況 → その応答は外部ではない。
+        d.cmd_self
+            .lock()
+            .unwrap()
+            .insert((3, 1), Instant::now());
+        let mut f = vec![3u8, 1];
+        f.resize(64, 0);
+        d.ch.mock_reply(&f);
+        assert!(!d.drain_axis(5));
+        assert!(*d.axis_passive.lock().unwrap() < Instant::now());
     }
 
     #[test]
@@ -3452,8 +3462,8 @@ mod tests {
             dd_pre: Mutex::new(BTreeMap::new()),
             axis_cache: Mutex::new(HashMap::new()),
             axis_self: Mutex::new(HashMap::new()),
+            cmd_self: Mutex::new(HashMap::new()),
             axis_passive: Mutex::new(Instant::now() - Duration::from_secs(1)),
-            axis_armed: Mutex::new(false),
         }
     }
 
