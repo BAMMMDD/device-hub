@@ -2715,7 +2715,9 @@ impl DeviceDriver for XsydDriver {
                     .unwrap_or_else(|p| p.into_inner())
                     .insert((kind, row), Instant::now());
             }
-            let deadline = Instant::now() + Duration::from_millis(60);
+            // 短く待って残りは次ポーリングの drain に回す — ここで長くブロック
+            // すると OBS ループ周期 (25ms) を大きく超えて表示 FPS が落ちる。
+            let deadline = Instant::now() + Duration::from_millis(14);
             let mut saw_axis = false;
             let mut foreign = false;
             while Instant::now() < deadline {

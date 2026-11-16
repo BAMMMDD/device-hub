@@ -50,6 +50,14 @@ struct Src {
     first_render: Option<bool>,
     /// プロパティ設定 (update() が UI スレッドから書く)。
     vis: Mutex<render::Vis>,
+    /// 補間のターゲットとなる最新スナップショット。
+    live: live::Live,
+    /// 表示中の補間値: キーごとの route (mm、samples 順) / ボタンごとの depth (0..1)。
+    /// データ到着 (~15-25Hz) より描画 (~60fps) のほうが速いので、
+    /// 値をそのまま描くと紙芝居になる — 指数補間で滑らかにする。
+    sm_route: Vec<f32>,
+    sm_depth: Vec<f32>,
+    last_tick: std::time::Instant,
 }
 
 impl Src {
@@ -64,7 +72,80 @@ impl Src {
             dirty: false,
             first_render: None,
             vis: Mutex::new(render::Vis::default()),
+            live: live::Live::default(),
+            sm_route: Vec::new(),
+            sm_depth: Vec::new(),
+            last_tick: std::time::Instant::now(),
         }
+    }
+
+    /// 補間値をターゲットへ近づける。まだ動いている (再描画が要る) なら true。
+    fn advance(&mut self, dt: f32) -> bool {
+        const TAU: f32 = 0.045; // s — 60fps なら ~3 フレームで 9 割追従
+        let k = 1.0 - (-dt / TAU).exp();
+        let mut moving = false;
+        match &self.live.kb {
+            Some(kb) => {
+                if self.sm_route.len() != kb.samples.len() {
+                    // 構成変更時はその場で追いつく (初回のスイープイン防止)。
+                    self.sm_route = kb.samples.iter().map(|s| s.route).collect();
+                } else {
+                    for (sm, t) in self
+                        .sm_route
+                        .iter_mut()
+                        .zip(kb.samples.iter().map(|s| s.route))
+                    {
+                        let d = t - *sm;
+                        if d.abs() > 0.004 {
+                            *sm += d * k;
+                            moving = true;
+                        } else {
+                            *sm = t;
+                        }
+                    }
+                }
+            }
+            None => self.sm_route.clear(),
+        }
+        match &self.live.mouse {
+            Some(m) => {
+                if self.sm_depth.len() != m.depths.len() {
+                    self.sm_depth = m.depths.iter().map(|b| b.depth).collect();
+                } else {
+                    for (sm, t) in self
+                        .sm_depth
+                        .iter_mut()
+                        .zip(m.depths.iter().map(|b| b.depth))
+                    {
+                        let d = t - *sm;
+                        if d.abs() > 0.003 {
+                            *sm += d * k;
+                            moving = true;
+                        } else {
+                            *sm = t;
+                        }
+                    }
+                }
+            }
+            None => self.sm_depth.clear(),
+        }
+        moving
+    }
+
+    /// 補間値で route/depth を差し替えた描画用スナップショット。
+    fn smoothed_live(&self) -> live::Live {
+        let mut l = self.live.clone();
+        if let Some(kb) = &mut l.kb {
+            for (smp, sm) in kb.samples.iter_mut().zip(&self.sm_route) {
+                smp.route = *sm;
+            }
+        }
+        if let Some(m) = &mut l.mouse {
+            for (b, sm) in m.depths.iter_mut().zip(&self.sm_depth) {
+                b.depth = *sm;
+            }
+        }
+        l
     }
 }
 
@@ -562,34 +643,45 @@ unsafe extern "C" fn video_render(d: *mut c_void, _e: *mut c_void) {
         return;
     };
     let s = &mut *(d as *mut Src);
-    // 新しいフレームがあればビットマップを焼き直す。
+    // 新しいデータ世代があれば補間のターゲットとして保持する。
     let (cfg, cfg_gen) = config::current();
     let cfg_changed = cfg_gen != s.last_cfg;
-    let snap = {
+    let new_data = {
         match live::shared().lock() {
             Ok(l) => {
-                if l.seq != s.last_seq || cfg_changed {
-                    Some((l.seq, l.clone()))
+                if l.seq != s.last_seq {
+                    s.live = l.clone();
+                    s.last_seq = l.seq;
+                    true
                 } else {
-                    None
+                    false
                 }
             }
             Err(_) => {
                 s.last_seq = u64::MAX;
-                None
+                false
             }
         }
     };
-    if let Some((seq, live)) = snap {
+    // 毎フレーム補間を進め、動いていれば焼き直す — ポーリング (~15-25Hz)
+    // より描画 (~60fps) が速いので、これで紙芝居を解消する。
+    let now = std::time::Instant::now();
+    let dt = now
+        .duration_since(s.last_tick)
+        .as_secs_f32()
+        .clamp(0.0, 0.1);
+    s.last_tick = now;
+    let moving = s.advance(dt);
+    if new_data || cfg_changed || moving || s.pix.is_none() {
         let vis = s.merge_vis(&cfg);
-        let pix = render::draw(&live, s.font.as_ref(), s.mode, &vis);
+        let disp = s.smoothed_live();
+        let pix = render::draw(&disp, s.font.as_ref(), s.mode, &vis);
         // サイズが変わったらテクスチャを作り直す。
         if s.pix.as_ref().is_some_and(|o| o.w != pix.w || o.h != pix.h) && !s.tex.is_null() {
             (api.tex_destroy)(s.tex);
             s.tex = core::ptr::null_mut();
         }
         s.pix = Some(pix);
-        s.last_seq = seq;
         s.last_cfg = cfg_gen;
         s.dirty = true;
     }
