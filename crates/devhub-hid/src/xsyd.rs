@@ -723,12 +723,15 @@ impl XsydDriver {
     /// HID 入力レポートは全オープンハンドルへ扇出されるので、公式 HUB 等の
     /// 別プロセスが投げた要求の応答もここに届く — 相乗りすれば自分は要求を
     /// 出さずに済み、公式 HUB 側の応答キューに他人のフレームを混ぜない。
-    /// 「自分が最近要求していない軸フレームだけ」が流れていれば外部
-    /// トラフィック中と判定し、受動モードを延長する (戻り値 = 外部検出)。
+    /// 「自分が最近要求していない軸フレームだけ」が流れているか、
+    /// 軸以外の既知 group フレーム (= 他人のコマンド応答 — 公式はエコー検証
+    /// せず最初のフレームを応答とみなすので混入は致命的) が流れていれば
+    /// 外部トラフィック中と判定し、受動モードを延長する (戻り値 = 外部検出)。
     fn drain_axis(&self, budget_ms: u64) -> bool {
         let deadline = Instant::now() + Duration::from_millis(budget_ms);
         let mut saw_any = false;
         let mut saw_ours = false;
+        let mut saw_foreign = false;
         while let Ok(b) = self.ch.recv(0) {
             if self.note_axis_frame(&b) {
                 saw_any = true;
@@ -739,15 +742,19 @@ impl XsydDriver {
                     .get(&(b[2], b[3]))
                     .is_some_and(|t| t.elapsed() < Duration::from_millis(500));
                 saw_ours |= ours;
+            } else if (1..=13).contains(&b[0]) && b.get(1) != Some(&0xFF) {
+                // 軸フレーム以外の既知応答 — OBS 経路では軸要求しか出さない
+                // ので、これは別クライアントのコマンド応答。
+                saw_foreign = true;
             }
             if Instant::now() >= deadline {
                 break;
             }
         }
-        let external = saw_any && !saw_ours;
+        let external = saw_foreign || (saw_any && !saw_ours);
         if external {
             *self.axis_passive.lock().unwrap_or_else(|p| p.into_inner()) =
-                Instant::now() + Duration::from_secs(2);
+                Instant::now() + Duration::from_secs(3);
         }
         external
     }
@@ -802,6 +809,11 @@ impl XsydDriver {
                         && b.get(1).copied() == Some(0xFF)
                     {
                         return Err(HubError::Unsupported("command"));
+                    }
+                    if (1..=13).contains(&b[0]) {
+                        // 軸以外の既知応答 = 別クライアントの会話 → 受動化。
+                        *self.axis_passive.lock().unwrap_or_else(|p| p.into_inner()) =
+                            Instant::now() + Duration::from_secs(3);
                     }
                 }
                 Err(HubError::Protocol(_)) => {}
@@ -3008,6 +3020,18 @@ mod tests {
         let out = d.live_axis().unwrap();
         assert!(d.ch.mock_sent().is_empty());
         assert_eq!(out.len(), registry::su66max_layout().len());
+    }
+
+    #[test]
+    fn drain_foreign_command_frame_triggers_passive() {
+        let d = mock_driver();
+        // 公式の設定応答 ([3,1,...] 等) が流れている状況 — OBS は
+        // 軸要求しか出さないので非軸フレーム = 他人のトラフィック。
+        let mut f = vec![3u8, 1];
+        f.resize(64, 0);
+        d.ch.mock_reply(&f);
+        assert!(d.drain_axis(5));
+        assert!(*d.axis_passive.lock().unwrap() > Instant::now());
     }
 
     #[test]
