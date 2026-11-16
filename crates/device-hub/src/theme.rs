@@ -128,23 +128,42 @@ pub fn display_font() -> Font {
     f
 }
 
-/// 同梱フォントをテキストシステムへ登録 (起動時に一度)。
+/// Zen Maru を登録済みか (選択されるまで登録しない)。
+static FONTS_ZEN: AtomicBool = AtomicBool::new(false);
+
+/// 同梱フォントをテキストシステムへ登録。
+/// Geist + IBM Plex Sans JP は常時 (ほぼ全選択肢の本文/フォールバック)。
+/// Zen Maru Gothic (7.6MB) は rounded/zenmaru 選択時だけ登録する —
+/// 使わないのに DirectWrite 側にも常駐させないため。
+/// フォント選択の変更時にも呼ぶ (`set_font_id` の後)。
 pub fn install_fonts(cx: &App) {
     use std::borrow::Cow;
-    let fonts: Vec<Cow<'static, [u8]>> = [
-        include_bytes!("../fonts/Geist.ttf").as_slice(),
-        include_bytes!("../fonts/IBMPlexSansJP-Regular.ttf").as_slice(),
-        include_bytes!("../fonts/IBMPlexSansJP-Bold.ttf").as_slice(),
-        include_bytes!("../fonts/ZenMaruGothic-Regular.ttf").as_slice(),
-        include_bytes!("../fonts/ZenMaruGothic-Bold.ttf").as_slice(),
-    ]
-    .into_iter()
-    .map(Cow::Borrowed)
-    .collect();
+    let mut raw: Vec<&'static [u8]> = Vec::new();
+    if !FONTS_GEIST.swap(true, Ordering::Relaxed) {
+        raw.extend([
+            include_bytes!("../fonts/Geist.ttf").as_slice(),
+            include_bytes!("../fonts/IBMPlexSansJP-Regular.ttf").as_slice(),
+            include_bytes!("../fonts/IBMPlexSansJP-Bold.ttf").as_slice(),
+        ]);
+    }
+    let need_zen = matches!(font_id(), "rounded" | "zenmaru");
+    if need_zen && !FONTS_ZEN.swap(true, Ordering::Relaxed) {
+        raw.extend([
+            include_bytes!("../fonts/ZenMaruGothic-Regular.ttf").as_slice(),
+            include_bytes!("../fonts/ZenMaruGothic-Bold.ttf").as_slice(),
+        ]);
+    }
+    if raw.is_empty() {
+        return;
+    }
+    let fonts: Vec<Cow<'static, [u8]>> = raw.into_iter().map(Cow::Borrowed).collect();
     if let Err(e) = cx.text_system().add_fonts(fonts) {
         eprintln!("[devhub] フォントの登録に失敗: {e}");
     }
 }
+
+/// Geist/IBM Plex を登録済みか。
+static FONTS_GEIST: AtomicBool = AtomicBool::new(false);
 
 /// 等幅 (生データ・コード表示用のシステムフォント)。
 pub const FONT_MONO: &str = "Cascadia Mono";

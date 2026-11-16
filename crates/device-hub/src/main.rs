@@ -10,6 +10,12 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// mimalloc: Windows の既定ヒープは free 済み領域を OS に返さず、
+// 長時間稼働でワーキングセットが膨らむ。mimalloc は未使用領域を
+// 解放し、断片化も抑える (Zed も同じ構成)。
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use device_hub::app::{clear_component_chrome, Shell};
 use device_hub::{prefs::Prefs, theme};
 use gpui_kit::component::{Theme, ThemeMode, TitleBar};
@@ -21,8 +27,11 @@ fn main() {
         .with_assets(gpui_kit::assets::AllAssets)
         .run(|cx| {
             gpui_kit::init(cx);
+            // フォント登録は選択の後 — 使う書体だけ載せて常駐メモリを削る。
+            let prefs = Prefs::load();
+            theme::set_font_id(&prefs.font);
             theme::install_fonts(cx);
-            let light = Prefs::load().light();
+            let light = prefs.light();
             theme::set_light(light);
             Theme::change(
                 if light {

@@ -15,6 +15,7 @@ gpui-kit = "0.9.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+mimalloc = { version = "0.1", default-features = false }
 smallvec = "1"
 futures = "0.3"
 raw-window-handle = "0.6"

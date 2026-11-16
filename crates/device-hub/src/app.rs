@@ -389,6 +389,9 @@ pub struct Shell {
     pub auto_form: crate::pages::auto::AutoForm,
 
     toast_timer: bool,
+    /// 自窓の HWND — 最小化中にワーキングセットを OS へ返すために使う。
+    #[cfg(windows)]
+    hwnd: isize,
     /// 窓が前面にあるか (render で毎フレーム更新)。
     /// 背面では Windows 11 が raw input 配信を制限するため、ポーリング実測の
     /// 表示はこのフラグで信用できるかを出し分ける。
@@ -477,6 +480,7 @@ impl Shell {
                         if ticks.is_multiple_of(15) {
                             this.hub.poll_battery();
                         }
+                        this.trim_if_minimized();
                     })
                     .is_ok();
                 if !alive {
@@ -505,7 +509,7 @@ impl Shell {
                             cx.notify();
                         }
                         // OBS オーバーレイのプレビュー (~15fps)。
-                        if this.route == Route::Obs && n % 2 == 0 {
+                        if this.route == Route::Obs && n.is_multiple_of(2) {
                             this.obs_t += 0.066;
                             cx.notify();
                         }
@@ -639,6 +643,8 @@ impl Shell {
             proc_retry: Default::default(),
             auto_form: Default::default(),
             toast_timer: false,
+            #[cfg(windows)]
+            hwnd: window_hwnd(window),
             last_window_active: true,
             poll_meas_end: None,
             poll_meas_result: None,
@@ -1944,4 +1950,36 @@ impl Drop for Shell {
         self.hub.dd_stop_all();
         std::thread::sleep(Duration::from_millis(80));
     }
+}
+
+#[cfg(windows)]
+fn window_hwnd(window: &Window) -> isize {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match HasWindowHandle::window_handle(window).map(|h| h.as_raw()) {
+        Ok(RawWindowHandle::Win32(h)) => h.hwnd.get(),
+        _ => 0,
+    }
+}
+
+impl Shell {
+    /// 最小化中はワーキングセットを OS に返す (2 秒ティックから呼ぶ)。
+    /// 復帰時にページフォルトで戻るので体感コストはほぼ無いが、
+    /// タスクマネージャで見える常駐メモリが最小化中だけ大きく下がる。
+    #[cfg(windows)]
+    fn trim_if_minimized(&self) {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
+        use windows::Win32::UI::WindowsAndMessaging::IsIconic;
+        if self.hwnd == 0 {
+            return;
+        }
+        unsafe {
+            if IsIconic(HWND(self.hwnd as _)).as_bool() {
+                let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn trim_if_minimized(&self) {}
 }

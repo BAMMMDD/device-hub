@@ -76,6 +76,8 @@ impl Shell {
                         |this, i, _w, cx| {
                             let id = theme::FONT_OPTIONS[i].0;
                             theme::set_font_id(id);
+                            // Zen Maru 系を初めて選んだときここで登録する。
+                            theme::install_fonts(cx);
                             this.prefs.font = id.into();
                             this.prefs.save();
                             cx.notify();
