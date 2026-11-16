@@ -250,7 +250,10 @@ pub struct MfDongleDriver {
     /// ドライバ再生成時に registry 既定へ戻らないようにする。
     detect_sink: Arc<Mutex<HashMap<String, (String, String)>>>,
     /// 磁気ボタンの作動点 EEPROM 値 (L, R) のキャッシュ。
+    /// 読み取りに失敗したまま (0,0) を入れない — 偽の作動点線が下端に出る。
     trig: Mutex<Option<(u8, u8)>>,
+    /// `trig` 再読の冷却 (休眠中に読めなかったとき、次の live poll で再試する)。
+    trig_retry: Mutex<std::time::Instant>,
     events: Option<Arc<dyn Fn(HubEvent) + Send + Sync>>,
 }
 
@@ -326,9 +329,9 @@ impl MfDongleDriver {
         };
         *self.caps.lock().unwrap_or_else(|p| p.into_inner()) = build_caps(&info, new);
         if new.magnetic {
-            let l = self.ee_u8(ee::LEFT_TRIGGER).unwrap_or(0);
-            let r = self.ee_u8(ee::RIGHT_TRIGGER).unwrap_or(0);
-            *self.trig.lock().unwrap_or_else(|p| p.into_inner()) = Some((l, r));
+            let l = self.ee_u8(ee::LEFT_TRIGGER).ok();
+            let r = self.ee_u8(ee::RIGHT_TRIGGER).ok();
+            *self.trig.lock().unwrap_or_else(|p| p.into_inner()) = l.zip(r);
         } else {
             *self.trig.lock().unwrap_or_else(|p| p.into_inner()) = None;
         }
@@ -379,6 +382,8 @@ pub fn open(
         detect_sink,
         sh: sh.clone(),
         trig: Mutex::new(None),
+        // 最初の試行はすぐ通す (init 済みなら使われない)。
+        trig_retry: Mutex::new(std::time::Instant::now() - Duration::from_secs(3)),
         events,
     };
     // 受信スレッド: 応答と通知を振り分ける。
@@ -395,11 +400,11 @@ pub fn open(
     if is_dongle {
         d.maybe_detect();
     }
-    // 初期の作動点を読んでキャッシュ (失敗しても None のまま進む)。
+    // 初期の作動点を読んでキャッシュ (失敗しても None のまま進む — 0 は偽線になる)。
     if d.model().magnetic {
-        let l = d.ee_u8(ee::LEFT_TRIGGER).unwrap_or(0);
-        let r = d.ee_u8(ee::RIGHT_TRIGGER).unwrap_or(0);
-        *d.trig.lock().unwrap_or_else(|p| p.into_inner()) = Some((l, r));
+        let l = d.ee_u8(ee::LEFT_TRIGGER).ok();
+        let r = d.ee_u8(ee::RIGHT_TRIGGER).ok();
+        *d.trig.lock().unwrap_or_else(|p| p.into_inner()) = l.zip(r);
     }
     Ok(d)
 }
@@ -1779,7 +1784,21 @@ impl DeviceDriver for MfDongleDriver {
             return Err(HubError::Unsupported("live_buttons"));
         }
         let (l, r) = *self.sh.depth.lock().unwrap_or_else(|p| p.into_inner());
-        let trig = *self.trig.lock().unwrap_or_else(|p| p.into_inner());
+        // 作動点が未取得 (休眠中に開いた等) → 2 秒冷却で再読。偽の下端線を出さない。
+        let mut trig = *self.trig.lock().unwrap_or_else(|p| p.into_inner());
+        if trig.is_none() {
+            let mut at = self.trig_retry.lock().unwrap_or_else(|p| p.into_inner());
+            if at.elapsed() >= Duration::from_secs(2) {
+                *at = std::time::Instant::now();
+                drop(at);
+                if let (Ok(l), Ok(r)) =
+                    (self.ee_u8(ee::LEFT_TRIGGER), self.ee_u8(ee::RIGHT_TRIGGER))
+                {
+                    *self.trig.lock().unwrap_or_else(|p| p.into_inner()) = Some((l, r));
+                    trig = Some((l, r));
+                }
+            }
+        }
         let mk = |raw: u8, ee: Option<u8>| {
             let depth = (raw as f32 / 100.).clamp(0., 1.);
             // JS: calibrData/5 >= getMSButtonTrigger()+1 → 作動 (5% 刻み)。
