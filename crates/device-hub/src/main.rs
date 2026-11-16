@@ -1,0 +1,60 @@
+//! Device HUB エントリポイント。
+//!
+//! 参照実装 (`src/main.rs`) と同じ構成:
+//!   gpui_kit::application().with_assets(AllAssets) → gpui_kit::init →
+//!   TitleBar::window_options → gpui_kit::open_window → Shell。
+//!
+//! 環境変数:
+//!   DEVHUB_DEMO=1  常にデモデバイス
+//!   DEVHUB_FAST=1  GPU ガラスを切る (フォールバック確認)
+
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use device_hub::app::{clear_component_chrome, Shell};
+use device_hub::{prefs::Prefs, theme};
+use gpui_kit::component::{Theme, ThemeMode, TitleBar};
+use gpui_kit::*;
+
+fn main() {
+    device_hub::rawinput::start(); // 実測ポーリングレート計測 (Raw Input)
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::AllAssets)
+        .run(|cx| {
+            gpui_kit::init(cx);
+            theme::install_fonts(cx);
+            let light = Prefs::load().light();
+            theme::set_light(light);
+            Theme::change(
+                if light {
+                    ThemeMode::Light
+                } else {
+                    ThemeMode::Dark
+                },
+                None,
+                cx,
+            );
+            clear_component_chrome(cx);
+
+            let mut options = TitleBar::window_options();
+            options.window_bounds = Some(WindowBounds::Windowed(Bounds::centered(
+                None,
+                size(px(1320.), px(840.)),
+                cx,
+            )));
+            options.window_min_size = Some(size(px(1040.), px(640.)));
+            // 背面に回ったら描画を間引く (ゲームの邪魔をしない)。
+            options.inactive_frame_interval = Some(std::time::Duration::from_millis(250));
+            options.app_id = Some("devicehub".into());
+
+            gpui_kit::open_window(options, cx, |window, cx| {
+                cx.new(|cx| Shell::new(window, cx))
+            })
+            .expect("failed to open window");
+            cx.on_window_closed(|cx, _| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+        });
+}

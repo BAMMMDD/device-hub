@@ -1,0 +1,949 @@
+//! 高度キー (DKS / MPT / MT / TGL / END / SOCD / RS)。
+
+use crate::app::{PopItem, Shell};
+use crate::pages::keyboard::{action_label, kb_parts, Cap};
+use crate::theme;
+use crate::ui::{self, Btn};
+use devhub_core::*;
+use gpui_kit::prelude::*;
+use gpui_kit::*;
+use std::rc::Rc;
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum PickTarget {
+    #[default]
+    Key,
+    Other,
+}
+
+/// 編集中の高度キー。
+#[derive(Clone, Default)]
+pub struct AdvDraft {
+    pub kind: Option<AdvancedKind>,
+    pub key: Option<usize>,
+    pub layer: u8,
+    pub binding: Option<Advanced>,
+    pub pick: PickTarget,
+}
+
+pub fn kind_meta(k: AdvancedKind) -> (&'static str, &'static str, &'static str) {
+    match k {
+        AdvancedKind::Dks => ("DKS", "ダイナミックキーストローク — 押し始め・底打ち・戻り始め・完全リリースの 4 段階で最大 4 キーを出す", "layers"),
+        AdvancedKind::Mpt => ("MPT", "多段トリガー — 押す深さ 3 段階で別々のキーを出す", "chart-column-increasing"),
+        AdvancedKind::Mt => ("MT", "マルチタップ — 短く押すとタップ用、長押しでホールド用のキー", "timer"),
+        AdvancedKind::Tgl => ("TGL", "トグル — 1 回押すと押しっぱなし、もう 1 回で解除", "toggle-right"),
+        AdvancedKind::End => ("END", "リリーストリガー — 戻りの指定位置でキーを出す (osu! 等)", "corner-left-up"),
+        AdvancedKind::Socd => ("SOCD", "反対方向キーの同時押しを解決 (後入力優先など)", "arrow-left-right"),
+        AdvancedKind::Rs => ("RS", "ラピッドスナップ — 2 キーのうち深く押された方だけを出す (カウンターストレイフ)", "zap"),
+    }
+}
+
+fn default_binding(k: AdvancedKind, kc: &KeyboardCaps, key: usize, other: usize) -> Advanced {
+    let code_of = |i: usize| match kc.layout.get(i).map(|l| l.label.as_str()) {
+        Some(l) => kc
+            .catalog
+            .first()
+            .and_then(|g| {
+                g.keys
+                    .iter()
+                    .find(|c| c.short.as_deref() == Some(l) || c.label == l)
+            })
+            .map(|c| c.code)
+            .unwrap_or(0x04),
+        None => 0x04,
+    };
+    let c = code_of(key);
+    match k {
+        AdvancedKind::Dks => Advanced::Dks {
+            rows: vec![DksRow {
+                code: c,
+                phases: [DksPhase::Hold, DksPhase::Off, DksPhase::Off, DksPhase::Off],
+            }],
+            bottom: 3.0,
+        },
+        AdvancedKind::Mpt => Advanced::Mpt {
+            depths: [0.8, 2.0, 3.2],
+            codes: [c, c, c],
+        },
+        AdvancedKind::Mt => Advanced::Mt {
+            tap: c,
+            hold: 0xE1,
+            hold_ms: 200,
+        },
+        AdvancedKind::Tgl => Advanced::Tgl {
+            code: c,
+            delay_ms: 20,
+        },
+        AdvancedKind::End => Advanced::End {
+            code: c,
+            code_release: c,
+            delay_ms: 20,
+        },
+        AdvancedKind::Socd => Advanced::Socd {
+            other,
+            code_a: c,
+            code_b: code_of(other),
+            mode: SocdMode::Last,
+            delay_ms: 0,
+        },
+        AdvancedKind::Rs => Advanced::Rs {
+            other,
+            code_a: c,
+            code_b: code_of(other),
+            delay_ms: 0,
+        },
+    }
+}
+
+fn partner(b: &Advanced) -> Option<usize> {
+    match b {
+        Advanced::Socd { other, .. } | Advanced::Rs { other, .. } => Some(*other),
+        _ => None,
+    }
+}
+
+impl Shell {
+    pub fn page_advanced(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = theme::pal();
+        let Some((kc, ks)) = kb_parts(self) else {
+            return div().into_any_element();
+        };
+
+        // ---- 一覧
+        let mut list = ui::body().pt(px(4.));
+        if ks.advanced.is_empty() {
+            list = list.child(ui::faint("まだ設定されていません").py(px(10.)));
+        }
+        for (i, a) in ks.advanced.iter().enumerate() {
+            let (name, _, icon) = kind_meta(a.binding.kind());
+            let label = kc
+                .layout
+                .get(a.key)
+                .map(|k| k.label.clone())
+                .unwrap_or_default();
+            let other = partner(&a.binding)
+                .and_then(|o| kc.layout.get(o))
+                .map(|k| format!(" + {}", k.label))
+                .unwrap_or_default();
+            let layer = kc.layers.get(a.layer as usize).cloned().unwrap_or_default();
+            let a_edit = a.clone();
+            let (key, lay) = (a.key, a.layer);
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .py(px(9.))
+                    .when(i > 0, |d| d.border_t_1().border_color(p.hair))
+                    .child(
+                        div()
+                            .size(px(32.))
+                            .rounded(px(10.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(p.accent_soft)
+                            .child(ui::icon(icon, 15., p.accent)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(format!("{label}{other}")),
+                            )
+                            .child(ui::faint(format!(
+                                "{name} · {layer} · {}",
+                                summary(&kc, &a.binding)
+                            ))),
+                    )
+                    .child(ui::icon_button(
+                        format!("adv-edit-{i}"),
+                        "pencil",
+                        cx,
+                        move |this, _, cx| {
+                            this.adv = AdvDraft {
+                                kind: Some(a_edit.binding.kind()),
+                                key: Some(a_edit.key),
+                                layer: a_edit.layer,
+                                binding: Some(a_edit.binding.clone()),
+                                pick: PickTarget::Key,
+                            };
+                            cx.notify();
+                        },
+                    ))
+                    .child(ui::icon_button(
+                        format!("adv-del-{i}"),
+                        "trash",
+                        cx,
+                        move |this, _, cx| {
+                            this.apply(
+                                Change::Advanced {
+                                    key,
+                                    layer: lay,
+                                    binding: None,
+                                },
+                                cx,
+                            );
+                        },
+                    )),
+            );
+        }
+        let list_card = ui::card_titled("設定済みの高度キー", "sparkles", None).child(list);
+
+        // ---- 種類の選択
+        let mut kinds = div().flex().flex_wrap().gap(px(10.));
+        for k in kc.advanced.iter().copied() {
+            let (name, desc, icon) = kind_meta(k);
+            let on = self.adv.kind == Some(k);
+            kinds = kinds.child(
+                div()
+                    .id(SharedString::from(format!("advk-{k:?}")))
+                    .w(px(228.))
+                    .p(px(12.))
+                    .flex()
+                    .gap(px(10.))
+                    .rounded(px(16.))
+                    .cursor_pointer()
+                    .border_1()
+                    .when(on, |d| {
+                        d.bg(p.accent_soft)
+                            .border_color(theme::alpha(p.accent, 0.55))
+                    })
+                    .when(!on, |d| {
+                        d.bg(p.ctrl)
+                            .border_color(p.hair)
+                            .hover(|s| s.bg(p.ctrl_hover))
+                    })
+                    .child(ui::icon(icon, 18., if on { p.accent } else { p.sub }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(3.))
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight::BOLD)
+                                    .child(name),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .line_height(px(15.))
+                                    .text_color(p.sub)
+                                    .child(desc),
+                            ),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let layer = this.kb_layer;
+                        this.adv = AdvDraft {
+                            kind: Some(k),
+                            key: None,
+                            layer,
+                            binding: None,
+                            pick: PickTarget::Key,
+                        };
+                        cx.notify();
+                    })),
+            );
+        }
+        let new_card = ui::card_titled("新しく設定する", "plus", None)
+            .child(ui::body().pt(px(8.)).pb(px(16.)).child(kinds));
+
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .gap(px(theme::GAP))
+            .child(list_card)
+            .child(new_card);
+        if self.adv.kind.is_some() {
+            col = col.child(self.adv_editor(&kc, &ks, cx));
+        }
+        col.into_any_element()
+    }
+
+    fn adv_editor(&mut self, kc: &KeyboardCaps, ks: &KeyboardState, cx: &mut Context<Self>) -> Div {
+        let p = theme::pal();
+        let d = self.adv.clone();
+        let kind = d.kind.expect("kind");
+        let (name, desc, icon) = kind_meta(kind);
+        let needs_other = matches!(kind, AdvancedKind::Socd | AdvancedKind::Rs);
+        let other = d.binding.as_ref().and_then(partner);
+
+        // キーボード図 (キーと相手を選ぶ)。
+        let caps: Vec<Cap> = kc
+            .layout
+            .iter()
+            .enumerate()
+            .map(|(i, k)| Cap {
+                top: k.label.clone(),
+                selected: d.key == Some(i),
+                link: other == Some(i),
+                badge: ks
+                    .advanced
+                    .iter()
+                    .any(|a| a.key == i && a.layer == d.layer)
+                    .then(|| "★".into()),
+                ..Default::default()
+            })
+            .collect();
+        let kc2 = kc.clone();
+        let view = self.keyboard_view(
+            "adv",
+            kc,
+            caps,
+            cx,
+            Rc::new(move |this, i, _, _| {
+                let kind = this.adv.kind.expect("kind");
+                match this.adv.pick {
+                    PickTarget::Key => {
+                        this.adv.key = Some(i);
+                        let other = this.adv.binding.as_ref().and_then(partner).unwrap_or(i);
+                        this.adv.binding = Some(default_binding(kind, &kc2, i, other));
+                        if matches!(kind, AdvancedKind::Socd | AdvancedKind::Rs) {
+                            this.adv.pick = PickTarget::Other;
+                        }
+                    }
+                    PickTarget::Other => {
+                        if let Some(key) = this.adv.key {
+                            if key != i {
+                                this.adv.binding = Some(default_binding(kind, &kc2, key, i));
+                                this.adv.pick = PickTarget::Key;
+                            }
+                        }
+                    }
+                }
+            }),
+        );
+        let key_name = |i: usize| {
+            kc.layout
+                .get(i)
+                .map(|l| l.label.clone())
+                .unwrap_or_else(|| "?".into())
+        };
+        let hint = match (d.key, d.pick, needs_other) {
+            (None, _, _) => "設定するキーをクリック".to_string(),
+            (Some(k), PickTarget::Other, true) => {
+                format!("「{}」と対にする相手キーをクリック", key_name(k))
+            }
+            (Some(k), _, _) => format!(
+                "ペア: {} ⇄ {}",
+                key_name(k),
+                other.map(key_name).unwrap_or_else(|| "未選択".into())
+            ),
+        };
+
+        let params: AnyElement = match d.binding.clone() {
+            None => div().into_any_element(),
+            Some(b) => self.adv_params(kc, b, cx).into_any_element(),
+        };
+        let can_save = d.key.is_some()
+            && d.binding.is_some()
+            && (!needs_other || other.is_some_and(|o| Some(o) != d.key));
+        let footer = div()
+            .flex()
+            .justify_end()
+            .gap(px(8.))
+            .child(ui::button(
+                "adv-cancel",
+                "閉じる",
+                None,
+                Btn::Ghost,
+                cx,
+                |this, _, cx| {
+                    this.adv = AdvDraft::default();
+                    cx.notify();
+                },
+            ))
+            .when(can_save, |f| {
+                f.child(ui::button(
+                    "adv-save",
+                    "保存",
+                    Some("check"),
+                    Btn::Primary,
+                    cx,
+                    |this, _, cx| {
+                        let d = this.adv.clone();
+                        if let (Some(key), Some(b)) = (d.key, d.binding) {
+                            // MPT の深さは単調増加でなければならない。
+                            if let Advanced::Mpt { depths, .. } = &b {
+                                if !(depths[0] < depths[1] && depths[1] < depths[2]) {
+                                    this.toast("3 つの深さは浅い順に大きくしてください", true, cx);
+                                    return;
+                                }
+                            }
+                            this.apply(
+                                Change::Advanced {
+                                    key,
+                                    layer: d.layer,
+                                    binding: Some(b),
+                                },
+                                cx,
+                            );
+                            this.adv = AdvDraft::default();
+                            this.toast("高度キーを保存しました", false, cx);
+                        }
+                    },
+                ))
+            });
+        ui::card_titled(
+            &format!("{name} を設定"),
+            icon,
+            Some(ui::chip(hint, p.accent).into_any_element()),
+        )
+        .child(
+            ui::body()
+                .gap(px(12.))
+                .pt(px(4.))
+                .pb(px(16.))
+                .child(ui::faint(desc))
+                .child(view)
+                .child(params)
+                .child(footer),
+        )
+    }
+
+    fn code_select(
+        &mut self,
+        id: &str,
+        kc: &KeyboardCaps,
+        code: u32,
+        cx: &mut Context<Self>,
+        f: impl Fn(&mut Shell, u32) + 'static,
+    ) -> Stateful<Div> {
+        let all: Vec<(u32, String)> = kc
+            .catalog
+            .iter()
+            .flat_map(|g| {
+                g.keys
+                    .iter()
+                    .map(move |k| (k.code, format!("{} — {}", k.label, g.name)))
+            })
+            .collect();
+        let items: Vec<PopItem> = all
+            .iter()
+            .map(|(c, l)| PopItem::new(l.clone(), *c == code))
+            .collect();
+        let cur = action_label(kc, &KeyAction::Code(code)).1;
+        let f = Rc::new(f);
+        ui::select(id, items, &cur, 190., cx, move |this, i, _, cx| {
+            f(this, all[i].0);
+            cx.notify();
+        })
+    }
+
+    fn adv_params(&mut self, kc: &KeyboardCaps, b: Advanced, cx: &mut Context<Self>) -> Div {
+        let p = theme::pal();
+        let travel = kc.perf.as_ref().map(|pc| pc.travel).unwrap_or(4.0);
+        let step = kc.perf.as_ref().map(|pc| pc.step).unwrap_or(0.01).max(0.01);
+        let upd = |f: Rc<dyn Fn(&mut Advanced)>| {
+            move |this: &mut Shell| {
+                if let Some(b) = this.adv.binding.as_mut() {
+                    f(b);
+                }
+            }
+        };
+        let mut body = div().flex().flex_col();
+        match b {
+            Advanced::Dks { rows, bottom } => {
+                let phases = ["押し始め", "底打ち", "戻り始め", "完全リリース"];
+                let mut head = div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .pb(px(6.))
+                    .child(div().w(px(200.)).child(ui::faint("キー")));
+                for ph in phases {
+                    head = head.child(
+                        div()
+                            .w(px(84.))
+                            .flex()
+                            .justify_center()
+                            .child(ui::faint(ph)),
+                    );
+                }
+                body = body.child(head);
+                for (ri, r) in rows.iter().enumerate() {
+                    let mut line = div().flex().items_center().gap(px(8.)).py(px(4.));
+                    line = line.child(
+                        self.code_select(
+                            &format!("dks-code-{ri}"),
+                            kc,
+                            r.code,
+                            cx,
+                            upd_rc(
+                                move |b| {
+                                    if let Advanced::Dks { rows, .. } = b {
+                                        if let Some(r) = rows.get_mut(ri) {
+                                            r.code = 0;
+                                        }
+                                    }
+                                },
+                                ri,
+                            ),
+                        )
+                        .w(px(200.)),
+                    );
+                    for (pi, ph) in r.phases.iter().enumerate() {
+                        let (label, c) = match ph {
+                            DksPhase::Off => ("—", p.faint),
+                            DksPhase::Tap => ("タップ", p.accent),
+                            DksPhase::Hold => ("ホールド", p.ok),
+                        };
+                        line = line.child(
+                            div()
+                                .id(SharedString::from(format!("dks-{ri}-{pi}")))
+                                .w(px(84.))
+                                .h(px(32.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(10.))
+                                .cursor_pointer()
+                                .bg(theme::alpha(c, 0.12))
+                                .border_1()
+                                .border_color(theme::alpha(c, 0.4))
+                                .text_size(px(12.))
+                                .text_color(c)
+                                .child(label)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(Advanced::Dks { rows, .. }) =
+                                        this.adv.binding.as_mut()
+                                    {
+                                        if let Some(r) = rows.get_mut(ri) {
+                                            r.phases[pi] = match r.phases[pi] {
+                                                DksPhase::Off => DksPhase::Tap,
+                                                DksPhase::Tap => DksPhase::Hold,
+                                                DksPhase::Hold => DksPhase::Off,
+                                            };
+                                        }
+                                    }
+                                    cx.notify();
+                                })),
+                        );
+                    }
+                    line = line.child(ui::icon_button(
+                        format!("dks-del-{ri}"),
+                        "x",
+                        cx,
+                        move |this, _, cx| {
+                            if let Some(Advanced::Dks { rows, .. }) = this.adv.binding.as_mut() {
+                                if rows.len() > 1 {
+                                    rows.remove(ri);
+                                }
+                            }
+                            cx.notify();
+                        },
+                    ));
+                    body = body.child(line);
+                }
+                if rows.len() < 4 {
+                    body = body.child(div().pt(px(4.)).child(ui::button(
+                        "dks-add",
+                        "キーを追加",
+                        Some("plus"),
+                        Btn::Ghost,
+                        cx,
+                        |this, _, cx| {
+                            if let Some(Advanced::Dks { rows, .. }) = this.adv.binding.as_mut() {
+                                rows.push(DksRow {
+                                    code: 0x04,
+                                    phases: [DksPhase::Off; 4],
+                                });
+                            }
+                            cx.notify();
+                        },
+                    )));
+                }
+                body = body.child(ui::row(
+                    "底打ちの深さ",
+                    None,
+                    ui::slider_value(
+                        "dks-bottom",
+                        bottom,
+                        0.5,
+                        travel,
+                        step,
+                        "mm",
+                        cx,
+                        move |this, v, cx| {
+                            upd(Rc::new(move |b| {
+                                if let Advanced::Dks { bottom, .. } = b {
+                                    *bottom = v;
+                                }
+                            }))(this);
+                            cx.notify();
+                        },
+                    ),
+                ));
+            }
+            Advanced::Mpt { depths, codes } => {
+                for i in 0..3 {
+                    body = body.child(
+                        ui::row(
+                            &format!("{} 段目", i + 1),
+                            None,
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(10.))
+                                .child(self.code_select(
+                                    &format!("mpt-code-{i}"),
+                                    kc,
+                                    codes[i],
+                                    cx,
+                                    move |this, c| {
+                                        if let Some(Advanced::Mpt { codes, .. }) =
+                                            this.adv.binding.as_mut()
+                                        {
+                                            codes[i] = c;
+                                        }
+                                    },
+                                ))
+                                .child(ui::slider_value(
+                                    &format!("mpt-d-{i}"),
+                                    depths[i],
+                                    0.1,
+                                    travel,
+                                    step,
+                                    "mm",
+                                    cx,
+                                    move |this, v, cx| {
+                                        if let Some(Advanced::Mpt { depths, .. }) =
+                                            this.adv.binding.as_mut()
+                                        {
+                                            depths[i] = v;
+                                        }
+                                        cx.notify();
+                                    },
+                                )),
+                        )
+                        .when(i == 0, |d| d.border_t_0()),
+                    );
+                }
+            }
+            Advanced::Mt { tap, hold, hold_ms } => {
+                body = body
+                    .child(ui::row_first(
+                        "タップで出すキー",
+                        None,
+                        self.code_select("mt-tap", kc, tap, cx, |this, c| {
+                            if let Some(Advanced::Mt { tap, .. }) = this.adv.binding.as_mut() {
+                                *tap = c;
+                            }
+                        }),
+                    ))
+                    .child(ui::row(
+                        "長押しで出すキー",
+                        None,
+                        self.code_select("mt-hold", kc, hold, cx, |this, c| {
+                            if let Some(Advanced::Mt { hold, .. }) = this.adv.binding.as_mut() {
+                                *hold = c;
+                            }
+                        }),
+                    ))
+                    .child(ui::row(
+                        "長押しと判定する時間",
+                        None,
+                        ui::slider_value(
+                            "mt-ms",
+                            hold_ms as f32,
+                            50.,
+                            1000.,
+                            10.,
+                            "ms",
+                            cx,
+                            |this, v, cx| {
+                                if let Some(Advanced::Mt { hold_ms, .. }) =
+                                    this.adv.binding.as_mut()
+                                {
+                                    *hold_ms = v as u16;
+                                }
+                                cx.notify();
+                            },
+                        ),
+                    ));
+            }
+            Advanced::Tgl { code, delay_ms } => {
+                body = body
+                    .child(ui::row_first(
+                        "トグルするキー",
+                        None,
+                        self.code_select("tgl-code", kc, code, cx, |this, c| {
+                            if let Some(Advanced::Tgl { code, .. }) = this.adv.binding.as_mut() {
+                                *code = c;
+                            }
+                        }),
+                    ))
+                    .child(ui::row(
+                        "押している時間",
+                        Some("トグル出力の押下時間"),
+                        ui::slider_value(
+                            "tgl-ms",
+                            delay_ms as f32,
+                            0.,
+                            500.,
+                            1.,
+                            "ms",
+                            cx,
+                            |this, v, cx| {
+                                if let Some(Advanced::Tgl { delay_ms, .. }) =
+                                    this.adv.binding.as_mut()
+                                {
+                                    *delay_ms = v as u16;
+                                }
+                                cx.notify();
+                            },
+                        ),
+                    ));
+            }
+            Advanced::End {
+                code,
+                code_release,
+                delay_ms,
+            } => {
+                body = body
+                    .child(ui::row_first(
+                        "押した時に出るキー",
+                        None,
+                        self.code_select("end-code", kc, code, cx, |this, c| {
+                            if let Some(Advanced::End { code, .. }) = this.adv.binding.as_mut() {
+                                *code = c;
+                            }
+                        }),
+                    ))
+                    .child(ui::row(
+                        "離した時に出るキー",
+                        None,
+                        self.code_select("end-code2", kc, code_release, cx, |this, c| {
+                            if let Some(Advanced::End { code_release, .. }) =
+                                this.adv.binding.as_mut()
+                            {
+                                *code_release = c;
+                            }
+                        }),
+                    ))
+                    .child(ui::row(
+                        "押している時間",
+                        None,
+                        ui::slider_value(
+                            "end-ms",
+                            delay_ms as f32,
+                            0.,
+                            500.,
+                            1.,
+                            "ms",
+                            cx,
+                            |this, v, cx| {
+                                if let Some(Advanced::End { delay_ms, .. }) =
+                                    this.adv.binding.as_mut()
+                                {
+                                    *delay_ms = v as u16;
+                                }
+                                cx.notify();
+                            },
+                        ),
+                    ));
+            }
+            Advanced::Socd {
+                code_a,
+                code_b,
+                mode,
+                delay_ms,
+                ..
+            } => {
+                // 「A のキー / B のキー」ではなく、盤面で選んだ物理キーの名前を出す。
+                let name = |i: Option<usize>| {
+                    i.and_then(|i| kc.layout.get(i))
+                        .map(|k| k.label.clone())
+                        .unwrap_or_else(|| "?".into())
+                };
+                let la = name(self.adv.key);
+                let lb = name(partner(&b));
+                let modes = [
+                    "後入力優先".to_string(),
+                    "先入力優先".to_string(),
+                    format!("{la} 優先"),
+                    format!("{lb} 優先"),
+                    "ニュートラル".to_string(),
+                ];
+                let cur = match mode {
+                    SocdMode::Last => 0,
+                    SocdMode::First => 1,
+                    SocdMode::PriorityA => 2,
+                    SocdMode::PriorityB => 3,
+                    SocdMode::Neutral => 4,
+                };
+                body = body
+                    .child(ui::row_first(
+                        &format!("「{la}」が送るキー"),
+                        Some(&format!("{la} を押したときに出るキー")),
+                        self.code_select("socd-a", kc, code_a, cx, |this, c| {
+                            if let Some(Advanced::Socd { code_a, .. }) = this.adv.binding.as_mut() {
+                                *code_a = c;
+                            }
+                        }),
+                    ))
+                    .child(ui::row(
+                        &format!("「{lb}」が送るキー"),
+                        Some(&format!("{lb} を押したときに出るキー")),
+                        self.code_select("socd-b", kc, code_b, cx, |this, c| {
+                            if let Some(Advanced::Socd { code_b, .. }) = this.adv.binding.as_mut() {
+                                *code_b = c;
+                            }
+                        }),
+                    ))
+                    .child(ui::row(
+                        "同時押しのとき",
+                        None,
+                        ui::segmented(
+                            "socd-mode",
+                            &modes.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                            cur,
+                            cx,
+                            |this, i, _| {
+                                if let Some(Advanced::Socd { mode, .. }) = this.adv.binding.as_mut()
+                                {
+                                    *mode = [
+                                        SocdMode::Last,
+                                        SocdMode::First,
+                                        SocdMode::PriorityA,
+                                        SocdMode::PriorityB,
+                                        SocdMode::Neutral,
+                                    ][i];
+                                }
+                            },
+                        )
+                        .w(px(460.)),
+                    ))
+                    .child(ui::row(
+                        "反転判定の遅延",
+                        Some("同時押し判定が切り替わるまでの時間"),
+                        ui::slider_value(
+                            "socd-ms",
+                            delay_ms as f32,
+                            0.,
+                            500.,
+                            1.,
+                            "ms",
+                            cx,
+                            |this, v, cx| {
+                                if let Some(Advanced::Socd { delay_ms, .. }) =
+                                    this.adv.binding.as_mut()
+                                {
+                                    *delay_ms = v as u16;
+                                }
+                                cx.notify();
+                            },
+                        ),
+                    ));
+            }
+            Advanced::Rs {
+                code_a,
+                code_b,
+                delay_ms,
+                ..
+            } => {
+                let name = |i: Option<usize>| {
+                    i.and_then(|i| kc.layout.get(i))
+                        .map(|k| k.label.clone())
+                        .unwrap_or_else(|| "?".into())
+                };
+                let la = name(self.adv.key);
+                let lb = name(partner(&b));
+                body = body
+                    .child(ui::row_first(
+                        &format!("「{la}」が送るキー"),
+                        Some(&format!("{la} を押したときに出るキー")),
+                        self.code_select("rs-a", kc, code_a, cx, |this, c| {
+                            if let Some(Advanced::Rs { code_a, .. }) = this.adv.binding.as_mut() {
+                                *code_a = c;
+                            }
+                        }),
+                    ))
+                    .child(ui::row(
+                        &format!("「{lb}」が送るキー"),
+                        Some(&format!("{lb} を押したときに出るキー")),
+                        self.code_select("rs-b", kc, code_b, cx, |this, c| {
+                            if let Some(Advanced::Rs { code_b, .. }) = this.adv.binding.as_mut() {
+                                *code_b = c;
+                            }
+                        }),
+                    ))
+                    .child(ui::row(
+                        "判定の遅延",
+                        Some("深い方への切替が確定するまでの時間"),
+                        ui::slider_value(
+                            "rs-ms",
+                            delay_ms as f32,
+                            0.,
+                            500.,
+                            1.,
+                            "ms",
+                            cx,
+                            |this, v, cx| {
+                                if let Some(Advanced::Rs { delay_ms, .. }) =
+                                    this.adv.binding.as_mut()
+                                {
+                                    *delay_ms = v as u16;
+                                }
+                                cx.notify();
+                            },
+                        ),
+                    ));
+            }
+        }
+        body
+    }
+}
+
+/// DKS 行のキー選択用 (code を書き換えるクロージャ)。
+fn upd_rc(
+    _unused: impl Fn(&mut Advanced) + 'static,
+    ri: usize,
+) -> impl Fn(&mut Shell, u32) + 'static {
+    move |this: &mut Shell, c: u32| {
+        if let Some(Advanced::Dks { rows, .. }) = this.adv.binding.as_mut() {
+            if let Some(r) = rows.get_mut(ri) {
+                r.code = c;
+            }
+        }
+    }
+}
+
+/// 一覧に出す 1 行の要約。
+fn summary(kc: &KeyboardCaps, b: &Advanced) -> String {
+    let n = |c: u32| action_label(kc, &KeyAction::Code(c)).0;
+    match b {
+        Advanced::Dks { rows, .. } => rows
+            .iter()
+            .map(|r| n(r.code))
+            .collect::<Vec<_>>()
+            .join(" / "),
+        Advanced::Mpt { codes, depths } => format!(
+            "{}@{:.1} {}@{:.1} {}@{:.1}",
+            n(codes[0]),
+            depths[0],
+            n(codes[1]),
+            depths[1],
+            n(codes[2]),
+            depths[2]
+        ),
+        Advanced::Mt { tap, hold, hold_ms } => {
+            format!("タップ {} / 長押し {} ({hold_ms}ms)", n(*tap), n(*hold))
+        }
+        Advanced::Tgl { code, .. } => n(*code),
+        Advanced::End {
+            code, code_release, ..
+        } => format!("{} ⇅ {}", n(*code), n(*code_release)),
+        Advanced::Socd { mode, .. } => format!("{mode:?}"),
+        Advanced::Rs { code_a, code_b, .. } => format!("{} ↔ {}", n(*code_a), n(*code_b)),
+    }
+}

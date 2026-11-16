@@ -1,0 +1,22 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# エディタ
+.vscode/
+.idea/
+
+# Windows の事故ファイル・一時物
+nul
+*.tmp
+Thumbs.db
+desktop.ini
+
+# 生成物 (obs-overlay の gallery/preview PNG など)
+/*.png
+obs-preview*.png
+obs-gallery*.png
+
+# ローカル実行用の設定 (実機/個人設定は配布物に入れない)
+prefs.json

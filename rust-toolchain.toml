@@ -1,0 +1,4 @@
+[toolchain]
+# gpui-kit (gpui-pre 0.3.11) は slice::as_array (Rust 1.95+) を使う。
+channel = "1.95.0"
+profile = "minimal"

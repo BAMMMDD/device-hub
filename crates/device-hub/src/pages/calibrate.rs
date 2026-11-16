@@ -1,0 +1,184 @@
+//! 磁軸キャリブレーション・ウィザード。
+//!
+//! 開始 → ドライバの `calibrate` を実行し、ストロークテスト (`live_travel`) を ON →
+//! 各キーの最大押下深さを記録し、底近く (全ストロークの 85%) まで押されたキーを緑にする →
+//! 完了で `calibrate_finish` (caps にあれば) を実行。Web 版は押されたかどうかが見えないが、
+//! ここでは押し残しが一目で分かる。
+
+use crate::app::{Modal, Shell};
+use crate::pages::keyboard::{kb_parts, Cap};
+use crate::theme;
+use crate::ui::{self, Btn};
+use gpui_kit::prelude::*;
+use gpui_kit::*;
+use std::rc::Rc;
+
+const DONE_RATIO: f32 = 0.85;
+
+impl Shell {
+    pub fn modal_calibrate(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let p = theme::pal();
+        let Some((kc, _)) = kb_parts(self) else {
+            return div().into_any_element();
+        };
+        let live = self.cur().map(|s| s.travel.clone()).unwrap_or_default();
+        // 完了判定は観測最大深さに対する比率 (公称全ストロークは実底より深い)。
+        let gmax = self.cur().map(|s| s.travel_max).unwrap_or(0.).max(1.5);
+        let done_mm = (gmax * DONE_RATIO).max(2.0);
+        let n = kc.layout.len();
+        let started = matches!(self.modal, Some(Modal::Calibrate { started: true, .. }));
+        // 最大深さを更新。
+        if let Some(Modal::Calibrate {
+            maxes,
+            started: true,
+        }) = self.modal.as_mut()
+        {
+            if maxes.len() != n {
+                *maxes = vec![0.; n];
+            }
+            for (m, d) in maxes.iter_mut().zip(live.iter()) {
+                *m = m.max(*d);
+            }
+        }
+        let maxes = match &self.modal {
+            Some(Modal::Calibrate { maxes, .. }) => maxes.clone(),
+            _ => vec![],
+        };
+        let done = maxes.iter().filter(|m| **m >= done_mm).count();
+        let caps: Vec<Cap> = kc
+            .layout
+            .iter()
+            .enumerate()
+            .map(|(i, k)| {
+                let m = maxes.get(i).copied().unwrap_or(0.);
+                let d = live.get(i).copied().unwrap_or(0.);
+                let ok = m >= done_mm;
+                Cap {
+                    top: k.label.clone(),
+                    sub: (started && m > 0.05).then(|| format!("{m:.2}")),
+                    tint: Some(if ok {
+                        theme::alpha(p.ok, 0.45)
+                    } else if m > 0.2 {
+                        theme::alpha(p.warn, 0.35)
+                    } else {
+                        p.key
+                    }),
+                    depth: started.then_some(d / gmax),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let view = self.keyboard_view("calib", &kc, caps, cx, Rc::new(|_, _, _, _| {}));
+        let has_finish = self
+            .cur()
+            .and_then(|s| s.caps.as_ref())
+            .is_some_and(|c| c.actions.iter().any(|a| a.id == "calibrate_finish"));
+
+        let footer = if !started {
+            div()
+                .flex()
+                .justify_end()
+                .gap(px(8.))
+                .child(ui::button(
+                    "cal-cancel",
+                    "閉じる",
+                    None,
+                    Btn::Ghost,
+                    cx,
+                    |this, _, cx| {
+                        this.modal = None;
+                        cx.notify();
+                    },
+                ))
+                .child(ui::button(
+                    "cal-start",
+                    "開始",
+                    Some("play"),
+                    Btn::Primary,
+                    cx,
+                    |this, _, cx| {
+                        if let Some(id) = this.device_id() {
+                            this.hub
+                                .run_action(&id, "calibrate", "キャリブレーション開始", None);
+                            this.hub.set_travel(&id, true);
+                        }
+                        this.modal = Some(Modal::Calibrate {
+                            started: true,
+                            maxes: vec![],
+                        });
+                        cx.notify();
+                    },
+                ))
+        } else {
+            let all = done == n && n > 0;
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(ui::faint(format!("{done} / {n} キー完了")))
+                .child(div().flex_1())
+                .child(ui::button(
+                    "cal-abort",
+                    "中止",
+                    None,
+                    Btn::Ghost,
+                    cx,
+                    |this, _, cx| {
+                        if let Some(id) = this.device_id() {
+                            this.hub.set_travel(&id, false);
+                        }
+                        this.modal = None;
+                        cx.notify();
+                    },
+                ))
+                .child(ui::button(
+                    "cal-finish",
+                    if all {
+                        "完了して保存"
+                    } else {
+                        "このまま保存"
+                    },
+                    Some("check"),
+                    if all { Btn::Primary } else { Btn::Glass },
+                    cx,
+                    move |this, _, cx| {
+                        if let Some(id) = this.device_id() {
+                            this.hub.set_travel(&id, false);
+                            if has_finish {
+                                this.hub.run_action(
+                                    &id,
+                                    "calibrate_finish",
+                                    "キャリブレーション保存",
+                                    None,
+                                );
+                            }
+                        }
+                        this.modal = None;
+                        this.toast(format!("キャリブレーション: {done}/{n} キー"), done < n, cx);
+                    },
+                ))
+        };
+        let frac = if n > 0 { done as f32 / n as f32 } else { 0. };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .child(ui::sub(if started {
+                "すべてのキーを 1 回ずつ、ゆっくり底まで押して離してください。底まで届いたキーは緑になります。"
+            } else {
+                "キーの押下量の基準を測り直します。開始したら、すべてのキーを 1 回ずつ底まで押してください。途中でキーボードを抜かないでください。"
+            }))
+            .when(started, |d| {
+                d.child(
+                    div()
+                        .h(px(6.))
+                        .rounded(px(3.))
+                        .bg(p.track)
+                        .child(div().h_full().w(relative(frac)).rounded(px(3.)).bg(p.ok)),
+                )
+            })
+            .child(view)
+            .child(footer)
+            .into_any_element()
+    }
+}
