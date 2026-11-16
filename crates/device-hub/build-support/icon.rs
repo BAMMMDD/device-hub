@@ -44,9 +44,53 @@ pub fn embed(icon: &str) {
     let script = out.join("app-icon.rc");
     let resource = out.join("app-icon.res");
     let name = source.file_name().expect("icon file name");
+    // バージョン情報 (VERSIONINFO) も同じ .rc で埋め込む。
+    // FileDescription がタスクマネージャー/ファイルプロパティの表示名になる。
+    let version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into());
+    let mut vparts = version.split('.').filter_map(|p| p.parse::<u32>().ok());
+    let fv = format!(
+        "{},{},{},0",
+        vparts.next().unwrap_or(0),
+        vparts.next().unwrap_or(0),
+        vparts.next().unwrap_or(0)
+    );
     fs::write(
         &script,
-        format!("1 ICON \"{}\"\r\n", name.to_string_lossy()),
+        format!(
+            concat!(
+                "1 ICON \"{name}\"\r\n",
+                "1 VERSIONINFO\r\n",
+                "FILEVERSION {fv}\r\n",
+                "PRODUCTVERSION {fv}\r\n",
+                "FILEFLAGSMASK 0x3fL\r\n",
+                "FILEFLAGS 0x0L\r\n",
+                "FILEOS 0x40004L\r\n",
+                "FILETYPE 0x1L\r\n",
+                "FILESUBTYPE 0x0L\r\n",
+                "BEGIN\r\n",
+                "    BLOCK \"StringFileInfo\"\r\n",
+                "    BEGIN\r\n",
+                "        BLOCK \"040904b0\"\r\n",
+                "        BEGIN\r\n",
+                "            VALUE \"CompanyName\", \"Device HUB\"\r\n",
+                "            VALUE \"FileDescription\", \"Device HUB\"\r\n",
+                "            VALUE \"FileVersion\", \"{ver}\"\r\n",
+                "            VALUE \"InternalName\", \"device-hub\"\r\n",
+                "            VALUE \"OriginalFilename\", \"device-hub.exe\"\r\n",
+                "            VALUE \"ProductName\", \"Device HUB\"\r\n",
+                "            VALUE \"ProductVersion\", \"{ver}\"\r\n",
+                "        END\r\n",
+                "    END\r\n",
+                "    BLOCK \"VarFileInfo\"\r\n",
+                "    BEGIN\r\n",
+                "        VALUE \"Translation\", 0x409, 1200\r\n",
+                "    END\r\n",
+                "END\r\n"
+            ),
+            name = name.to_string_lossy(),
+            fv = fv,
+            ver = version,
+        ),
     )
     .expect("write app-icon.rc");
     let status = Command::new(&rc)

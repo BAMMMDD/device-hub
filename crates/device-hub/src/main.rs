@@ -54,6 +54,10 @@ fn main() {
             // 背面に回ったら描画を間引く (ゲームの邪魔をしない)。
             options.inactive_frame_interval = Some(std::time::Duration::from_millis(250));
             options.app_id = Some("devicehub".into());
+            // 窓キャプション — タスクマネージャーと Alt+Tab の表示名になる。
+            if let Some(tb) = options.titlebar.as_mut() {
+                tb.title = Some("Device HUB".into());
+            }
 
             gpui_kit::open_window(options, cx, |window, cx| {
                 cx.new(|cx| Shell::new(window, cx))
