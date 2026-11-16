@@ -2667,66 +2667,105 @@ impl DeviceDriver for XsydDriver {
     }
 
     /// `[4,3,kind,row]` × ADC/Route/Calibrate/KeyStatus を行 1-5 で取得し layout 順にまとめる。
-    /// まずキューをドレインして流れているフレームをキャッシュし、新鮮なものは
-    /// 要求せず使う — 公式 HUB 等の別プロセスが会話中ならその応答に相乗りして
-    /// 自分は送信を休む (HID 入力は扇出されるため、こちらの応答が公式側の
-    /// 受信キューに混入して設定値を化けさせるのを防ぐ)。
+    /// まずキューをドレインして流れているフレームをキャッシュし、不足セルには
+    /// まとめて要求を送って一括収集する (セルごと往復では 25ms 枠を超え、
+    /// 更新が飛び飛びになる)。公式 HUB 等の別プロセスが会話中ならその応答に
+    /// 相乗りして自分は送信を休む (受動モード)。
     fn live_axis(&self) -> HubResult<Vec<AxisSample>> {
-        self.drain_axis(4);
-        // axis_row の待機中にも外部検出し得るので、read 内部で毎回評価する。
-        let is_passive =
-            || *self.axis_passive.lock().unwrap_or_else(|p| p.into_inner()) > Instant::now();
-        let read = |row: u8, kind: u8| -> HubResult<[u16; 30]> {
-            let passive = is_passive();
-            // Route/KeyStatus は毎ポーリング更新、ADC/Calibrate は緩め
-            // (要求総量を減らして公式 HUB との併用を穏やかにする)。
-            let fresh = match kind {
-                k if k == axis::ROUTE || k == axis::KEY_STATUS => {
-                    Duration::from_millis(400)
-                }
-                _ => Duration::from_millis(2500),
-            };
-            let cached = self
-                .axis_cache
+        const KINDS: [u8; 4] =
+            [axis::ADC, axis::ROUTE, axis::CALIBRATE, axis::KEY_STATUS];
+        // 視覚的な滑らかさに効く 2 種は ~ポーリング毎、変化の少ない 2 種は間引く。
+        let fresh_for = |kind: u8| match kind {
+            k if k == axis::ROUTE || k == axis::KEY_STATUS => Duration::from_millis(60),
+            _ => Duration::from_millis(2500),
+        };
+        let cell_age = |kind: u8, row: u8| -> Option<(Instant, [u16; 30])> {
+            self.axis_cache
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .get(&(kind, row))
-                .copied();
-            if let Some((t, v)) = cached {
-                // 新鮮なら使う。受動モード中は古くても使う (要求を出さない)。
-                if t.elapsed() < fresh || passive {
-                    return Ok(v);
-                }
-            }
-            if passive {
-                return Ok([0; 30]);
-            }
-            match self.axis_row(row, kind) {
-                Ok(v) => Ok(v),
-                Err(HubError::Unsupported(_)) => Ok([0; 30]),
-                Err(e) => Err(e),
+                .copied()
+        };
+        let stale = |kind: u8, row: u8| -> bool {
+            match cell_age(kind, row) {
+                Some((t, _)) => t.elapsed() >= fresh_for(kind),
+                None => true,
             }
         };
+        let is_passive =
+            || *self.axis_passive.lock().unwrap_or_else(|p| p.into_inner()) > Instant::now();
+
+        self.drain_axis(4);
+
+        // 不足セルを洗い出して一括要求 → エコーをまとめて収集する。
+        let mut wanted = Vec::with_capacity(20);
+        for row in 1..=5u8 {
+            for kind in KINDS {
+                if stale(kind, row) {
+                    wanted.push((kind, row));
+                }
+            }
+        }
+        if !wanted.is_empty() && !is_passive() {
+            for &(kind, row) in &wanted {
+                self.ch
+                    .send(&[grp::PERFORMANCE, sub::AXIS_DATA, kind, row])?;
+                self.axis_self
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert((kind, row), Instant::now());
+            }
+            let deadline = Instant::now() + Duration::from_millis(60);
+            let mut saw_axis = false;
+            let mut foreign = false;
+            while Instant::now() < deadline {
+                match self.ch.recv(5) {
+                    Ok(b) => {
+                        if self.note_axis_frame(&b) {
+                            saw_axis = true;
+                        } else if b.first().copied() == Some(grp::PERFORMANCE)
+                            && b.get(1).copied() == Some(0xFF)
+                        {
+                            // 未対応の (kind,row) — 0 埋めで進める。
+                            self.axis_cache
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .insert((b[2], b[3]), (Instant::now(), [0; 30]));
+                        } else if self.is_foreign_cmd(&b) {
+                            self.note_foreign();
+                            foreign = true;
+                            break;
+                        }
+                        if wanted.iter().all(|&(k, r)| !stale(k, r)) {
+                            break;
+                        }
+                    }
+                    Err(HubError::Protocol(_)) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            // 軸フレームが 1 枚も来ず外部応答でもない → 切断とみなす
+            // (従来通り失敗として伝播し、切断検知を保つ)。
+            if !saw_axis && !foreign {
+                return Err(HubError::Protocol("axis: no frames".into()));
+            }
+        }
+
         let layout = registry::su66max_layout();
         let mut out = vec![AxisSample::default(); layout.len()];
-        for row in 1..=5u8 {
-            // エラーは伝播する (Unsupported = その kind が無い場合のみ 0 埋め)。
-            // 全エラー 0 埋めだと切断後もゾンビ計測が続き TravelStopped に到達しない。
-            let adc = read(row, axis::ADC)?;
-            let route = read(row, axis::ROUTE)?;
-            let cal = read(row, axis::CALIBRATE)?;
-            let status = read(row, axis::KEY_STATUS)?;
-            for (i, k) in layout.iter().enumerate() {
-                let (kr, kc) = registry::su66max_matrix_pos(k.id);
-                if kr == row && (kc as usize) < 30 {
-                    let c = kc as usize;
-                    out[i] = AxisSample {
-                        route: route[c] as f32 / 1000.0,
-                        adc: adc[c],
-                        status: status[c] as u8,
-                        calibrated: cal[c] as u8,
-                    };
-                }
+        let cell = |kind: u8, row: u8| -> [u16; 30] {
+            cell_age(kind, row).map(|(_, v)| v).unwrap_or([0; 30])
+        };
+        for (i, k) in layout.iter().enumerate() {
+            let (kr, kc) = registry::su66max_matrix_pos(k.id);
+            if (1..=5).contains(&kr) && (kc as usize) < 30 {
+                let c = kc as usize;
+                out[i] = AxisSample {
+                    route: cell(axis::ROUTE, kr)[c] as f32 / 1000.0,
+                    adc: cell(axis::ADC, kr)[c],
+                    status: cell(axis::KEY_STATUS, kr)[c] as u8,
+                    calibrated: cell(axis::CALIBRATE, kr)[c] as u8,
+                };
             }
         }
         Ok(out)
