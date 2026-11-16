@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# 同じブランチへの連続 push では古い run を自動キャンセル。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: windows-latest
