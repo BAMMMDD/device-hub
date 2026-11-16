@@ -20,7 +20,7 @@ use crate::transport::Channel;
 use devhub_core::backend::*;
 use devhub_core::model::*;
 use devhub_core::registry;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -161,6 +161,9 @@ struct XsydInfo {
 /// セル番号 → 確認済みの BGR。書き込み失敗で適用が不確かなセルは None。
 type DdPins = BTreeMap<usize, Option<[u8; 3]>>;
 
+/// 軸フレームキャッシュの型: (kind,row) → (取得時刻, 30 セル)。
+type AxisCache = Mutex<HashMap<(u8, u8), (Instant, [u16; 30])>>;
+
 pub struct XsydDriver {
     info: DeviceInfo,
     ch: Channel,
@@ -182,6 +185,14 @@ pub struct XsydDriver {
     /// DD とユーザーカスタムは同じ isCustom フラグを共有するので、
     /// 区別しないと DD がユーザーのカスタムを巻き込んで消す。
     dd_pre: Mutex<BTreeMap<u8, BTreeMap<usize, [u8; 3]>>>,
+    /// 軸フレームのキャッシュ: (kind,row) → (取得時刻, 30 セル)。
+    /// 入力キューは全オープンハンドルへ扇出されるので、公式 HUB 等
+    /// 他ツールの要求が起こしたフレームも拾える (相乗り受動化)。
+    axis_cache: AxisCache,
+    /// 自分が直近で投げた `[4,3,kind,row]` の時刻 — 外部トラフィック検出用。
+    axis_self: Mutex<HashMap<(u8, u8), Instant>>,
+    /// 外部トラフィックを検出したら要求を休む期限 (受動モード)。
+    axis_passive: Mutex<Instant>,
 }
 
 /// `2,5` ポーリング wire code → ラベル (SDK Fn)。
@@ -224,6 +235,9 @@ pub fn open(dev: hidapi::HidDevice, info: DeviceInfo) -> HubResult<XsydDriver> {
         dead_since: Mutex::new(None),
         dd_pins: Mutex::new(BTreeMap::new()),
         dd_pre: Mutex::new(BTreeMap::new()),
+        axis_cache: Mutex::new(HashMap::new()),
+        axis_self: Mutex::new(HashMap::new()),
+        axis_passive: Mutex::new(Instant::now() - Duration::from_secs(1)),
     };
     // [1,3] DeviceFeature: r[2]=axisType(機種バリアント enum、磁気=2), r[3]=接続,
     // r[4]={rgb,knob}, r[5]={画面,haptic,numpad,dotMatrix}。レイヤー数ではない。
@@ -687,6 +701,57 @@ impl XsydDriver {
         Ok(())
     }
 
+    /// `[4,3,kind,row]` フレームならキャッシュに入れて true を返す。
+    /// フレーム内容は 30×u16 LE。
+    fn note_axis_frame(&self, b: &[u8]) -> bool {
+        if b.len() >= 64 && b[0] == grp::PERFORMANCE && b[1] == sub::AXIS_DATA {
+            let mut out = [0u16; 30];
+            for i in 0..30 {
+                out[i] = u16::from_le_bytes([b[4 + i * 2], b[5 + i * 2]]);
+            }
+            self.axis_cache
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert((b[2], b[3]), (Instant::now(), out));
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 入力キューを軽くドレインして流れている軸フレームをキャッシュする。
+    /// HID 入力レポートは全オープンハンドルへ扇出されるので、公式 HUB 等の
+    /// 別プロセスが投げた要求の応答もここに届く — 相乗りすれば自分は要求を
+    /// 出さずに済み、公式 HUB 側の応答キューに他人のフレームを混ぜない。
+    /// 「自分が最近要求していない軸フレームだけ」が流れていれば外部
+    /// トラフィック中と判定し、受動モードを延長する (戻り値 = 外部検出)。
+    fn drain_axis(&self, budget_ms: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_millis(budget_ms);
+        let mut saw_any = false;
+        let mut saw_ours = false;
+        while let Ok(b) = self.ch.recv(0) {
+            if self.note_axis_frame(&b) {
+                saw_any = true;
+                let ours = self
+                    .axis_self
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get(&(b[2], b[3]))
+                    .is_some_and(|t| t.elapsed() < Duration::from_millis(500));
+                saw_ours |= ours;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+        }
+        let external = saw_any && !saw_ours;
+        if external {
+            *self.axis_passive.lock().unwrap_or_else(|p| p.into_inner()) =
+                Instant::now() + Duration::from_secs(2);
+        }
+        external
+    }
+
     /// `[4,3,kind,row]` → 30×u16 LE (mm×1000)。kind: axis::* (ADC=0,Route=1,Calibrate=2,KeyStatus=3)。
     /// 実機は live 軸データを `[4,3,kind,row]` フレームで自律ストリーム配信する
     /// (全 kind×row 組を ~16ms で巡回)。cmd() の「最初の group-4 パケットを応答と
@@ -706,32 +771,40 @@ impl XsydDriver {
         }
         self.ch
             .send(&[grp::PERFORMANCE, sub::AXIS_DATA, kind, row])?;
+        // 自分の要求を記録 — drain で外部トラフィックと区別するために使う。
+        self.axis_self
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert((kind, row), Instant::now());
         let wait_ms = if probing { PROBE_WAIT_MS } else { DEADLINE_MS };
         let deadline = Instant::now() + Duration::from_millis(wait_ms);
         while Instant::now() < deadline {
             match self.ch.recv(POLL_MS) {
-                Ok(b)
-                    if b.len() >= 64
-                        && b[0] == grp::PERFORMANCE
-                        && b[1] == sub::AXIS_DATA
-                        && b[2] == kind
-                        && b[3] == row =>
-                {
-                    let mut out = [0u16; 30];
-                    for i in 0..30 {
-                        out[i] = u16::from_le_bytes([b[4 + i * 2], b[5 + i * 2]]);
+                Ok(b) => {
+                    // 軸フレームはエコー外でもキャッシュに入れる
+                    // (要求した 1 枚で他行/他 kind のフレームも流れるため)。
+                    if self.note_axis_frame(&b) {
+                        if b[2] == kind && b[3] == row {
+                            self.fails.store(0, Ordering::Relaxed);
+                            *self.dead_since.lock().unwrap_or_else(|p| p.into_inner()) =
+                                None;
+                            return Ok(self
+                                .axis_cache
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .get(&(kind, row))
+                                .map(|(_, v)| *v)
+                                .unwrap_or([0; 30]));
+                        }
+                        continue;
                     }
-                    self.fails.store(0, Ordering::Relaxed);
-                    *self.dead_since.lock().unwrap_or_else(|p| p.into_inner()) = None;
-                    return Ok(out);
-                }
-                Ok(b)
                     if b.first().copied() == Some(grp::PERFORMANCE)
-                        && b.get(1).copied() == Some(0xFF) =>
-                {
-                    return Err(HubError::Unsupported("command"))
+                        && b.get(1).copied() == Some(0xFF)
+                    {
+                        return Err(HubError::Unsupported("command"));
+                    }
                 }
-                Ok(_) | Err(HubError::Protocol(_)) => {}
+                Err(HubError::Protocol(_)) => {}
                 Err(e) => return Err(e),
             }
         }
@@ -2551,23 +2624,53 @@ impl DeviceDriver for XsydDriver {
     }
 
     /// `[4,3,kind,row]` × ADC/Route/Calibrate/KeyStatus を行 1-5 で取得し layout 順にまとめる。
+    /// まずキューをドレインして流れているフレームをキャッシュし、新鮮なものは
+    /// 要求せず使う — 公式 HUB 等の別プロセスが会話中ならその応答に相乗りして
+    /// 自分は送信を休む (HID 入力は扇出されるため、こちらの応答が公式側の
+    /// 受信キューに混入して設定値を化けさせるのを防ぐ)。
     fn live_axis(&self) -> HubResult<Vec<AxisSample>> {
+        self.drain_axis(4);
+        let passive = *self.axis_passive.lock().unwrap_or_else(|p| p.into_inner())
+            > Instant::now();
+        let read = |row: u8, kind: u8| -> HubResult<[u16; 30]> {
+            // Route/KeyStatus は毎ポーリング更新、ADC/Calibrate は緩め
+            // (要求総量を減らして公式 HUB との併用を穏やかにする)。
+            let fresh = match kind {
+                k if k == axis::ROUTE || k == axis::KEY_STATUS => {
+                    Duration::from_millis(400)
+                }
+                _ => Duration::from_millis(2500),
+            };
+            let cached = self
+                .axis_cache
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(&(kind, row))
+                .copied();
+            if let Some((t, v)) = cached {
+                // 新鮮なら使う。受動モード中は古くても使う (要求を出さない)。
+                if t.elapsed() < fresh || passive {
+                    return Ok(v);
+                }
+            }
+            if passive {
+                return Ok([0; 30]);
+            }
+            match self.axis_row(row, kind) {
+                Ok(v) => Ok(v),
+                Err(HubError::Unsupported(_)) => Ok([0; 30]),
+                Err(e) => Err(e),
+            }
+        };
         let layout = registry::su66max_layout();
         let mut out = vec![AxisSample::default(); layout.len()];
         for row in 1..=5u8 {
             // エラーは伝播する (Unsupported = その kind が無い場合のみ 0 埋め)。
             // 全エラー 0 埋めだと切断後もゾンビ計測が続き TravelStopped に到達しない。
-            let read = |kind: u8| -> HubResult<[u16; 30]> {
-                match self.axis_row(row, kind) {
-                    Ok(v) => Ok(v),
-                    Err(HubError::Unsupported(_)) => Ok([0; 30]),
-                    Err(e) => Err(e),
-                }
-            };
-            let adc = read(axis::ADC)?;
-            let route = read(axis::ROUTE)?;
-            let cal = read(axis::CALIBRATE)?;
-            let status = read(axis::KEY_STATUS)?;
+            let adc = read(row, axis::ADC)?;
+            let route = read(row, axis::ROUTE)?;
+            let cal = read(row, axis::CALIBRATE)?;
+            let status = read(row, axis::KEY_STATUS)?;
             for (i, k) in layout.iter().enumerate() {
                 let (kr, kc) = registry::su66max_matrix_pos(k.id);
                 if kr == row && (kc as usize) < 30 {
@@ -2854,6 +2957,82 @@ mod tests {
         r[2..9].copy_from_slice(b" 49142 ");
         r[40..56].copy_from_slice(b"2026101216:41:03");
         assert_eq!(parse_fw(&r).as_deref(), Some("2026101216:41:03"));
+    }
+
+    // ---- live_axis の相乗り/受動モード ----
+
+    /// `[4,3,kind,row]` 軸フレーム。cell0 に mark を入れる。
+    fn axis_frame(kind: u8, row: u8, mark: u16) -> Vec<u8> {
+        let mut f = vec![4u8, 3, kind, row];
+        for i in 0..30 {
+            let v = if i == 0 { mark } else { 0 };
+            f.extend_from_slice(&v.to_le_bytes());
+        }
+        f
+    }
+
+    /// 全 kind×row (20 枚) をキューに積む。
+    fn seed_all(d: &XsydDriver, mark: u16) {
+        for row in 1..=5 {
+            for kind in 0..=3 {
+                d.ch.mock_reply(&axis_frame(kind, row, mark));
+            }
+        }
+    }
+
+    #[test]
+    fn live_axis_piggyback_sends_no_requests() {
+        let d = mock_driver();
+        // 公式 HUB 等の要求が起こしたフレームだけが流れている状況。
+        seed_all(&d, 1500);
+        let out = d.live_axis().unwrap();
+        // 相乗りで全部キャッシュから取れるので要求は 0。
+        assert!(d.ch.mock_sent().is_empty());
+        // 値はキャッシュから来ている (route は /1000 → 1.5mm)。
+        assert!(out.iter().any(|s| (s.route - 1.5).abs() < 0.001));
+        // 外部トラフィック検出で受動モードが立っている。
+        assert!(
+            *d.axis_passive.lock().unwrap() > Instant::now(),
+            "外部フレームだけのはずなので受動モードになる"
+        );
+    }
+
+    #[test]
+    fn live_axis_passive_never_requests() {
+        let d = mock_driver();
+        // 外部フレーム 1 枚で受動モードへ。
+        d.ch.mock_reply(&axis_frame(1, 1, 1000));
+        d.drain_axis(5);
+        assert!(*d.axis_passive.lock().unwrap() > Instant::now());
+        // キューが空でも要求を出さず Ok で返す (欠損セルは 0)。
+        let out = d.live_axis().unwrap();
+        assert!(d.ch.mock_sent().is_empty());
+        assert_eq!(out.len(), registry::su66max_layout().len());
+    }
+
+    #[test]
+    fn axis_row_ignores_foreign_frames_and_caches_them() {
+        let d = mock_driver();
+        // 他 kind/他行のフレーム → 自分のエコーの順で届く。
+        d.ch.mock_reply(&axis_frame(3, 5, 777));
+        d.ch.mock_reply(&axis_frame(1, 1, 2048));
+        let v = d.axis_row(1, 1).unwrap();
+        assert_eq!(v[0], 2048);
+        // エコー外のフレームも捨てずキャッシュに入る (相乗りに使う)。
+        let c = d.axis_cache.lock().unwrap();
+        assert_eq!(c.get(&(3, 5)).unwrap().1[0], 777);
+        // 自分の要求が記録されている。
+        assert!(d.axis_self.lock().unwrap().contains_key(&(1, 1)));
+    }
+
+    #[test]
+    fn live_axis_requests_when_cache_cold() {
+        let d = mock_driver();
+        // キャッシュも受動モードも無い → 要求を出して応答待ち → モックは
+        // 応答を返さないのでエラー。切断検知に必要な挙動は残っている。
+        assert!(d.live_axis().is_err());
+        let sent = d.ch.mock_sent();
+        assert!(sent.iter().any(|s| s.len() >= 4 && s[0] == 4 && s[1] == 3));
     }
 
     /// 照明 wire レイアウト (公式 lightingBaseData と一致) の境界値。
@@ -3206,6 +3385,9 @@ mod tests {
             dead_since: Mutex::new(None),
             dd_pins: Mutex::new(BTreeMap::new()),
             dd_pre: Mutex::new(BTreeMap::new()),
+            axis_cache: Mutex::new(HashMap::new()),
+            axis_self: Mutex::new(HashMap::new()),
+            axis_passive: Mutex::new(Instant::now() - Duration::from_secs(1)),
         }
     }
 
