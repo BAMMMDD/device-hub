@@ -193,6 +193,11 @@ pub struct XsydDriver {
     axis_self: Mutex<HashMap<(u8, u8), Instant>>,
     /// 外部トラフィックを検出したら要求を休む期限 (受動モード)。
     axis_passive: Mutex<Instant>,
+    /// デバイス側の軸ストリームが武装中か。実機検証: 1 回の `[4,3]` で
+    /// ~28fps の自律配信が始まり 150 秒以上止まらず、任意の非軸コマンドで
+    /// 解除される。公式 HUB は「送信後の最初のフレーム」を応答とみなすため、
+    /// 武装中は公式の全読み出しが破壊される — 外部検出時は即解除する。
+    axis_armed: Mutex<bool>,
 }
 
 /// `2,5` ポーリング wire code → ラベル (SDK Fn)。
@@ -238,6 +243,7 @@ pub fn open(dev: hidapi::HidDevice, info: DeviceInfo) -> HubResult<XsydDriver> {
         axis_cache: Mutex::new(HashMap::new()),
         axis_self: Mutex::new(HashMap::new()),
         axis_passive: Mutex::new(Instant::now() - Duration::from_secs(1)),
+        axis_armed: Mutex::new(false),
     };
     // [1,3] DeviceFeature: r[2]=axisType(機種バリアント enum、磁気=2), r[3]=接続,
     // r[4]={rgb,knob}, r[5]={画面,haptic,numpad,dotMatrix}。レイヤー数ではない。
@@ -751,12 +757,39 @@ impl XsydDriver {
                 break;
             }
         }
-        let external = saw_foreign || (saw_any && !saw_ours);
-        if external {
-            *self.axis_passive.lock().unwrap_or_else(|p| p.into_inner()) =
-                Instant::now() + Duration::from_secs(3);
+        // 非軸フレーム = 他人のコマンド応答 → そのコマンド自体がデバイス側の
+        // ストリームを解除したはずだが、確実を期してこちらからも解除コマンドを
+        // 送る (1 回だけ、軽い読み出し)。軸フレームだけの外部検出は他人の
+        // ストリームに相乗りするので解除しない。
+        if saw_foreign {
+            self.note_foreign(true);
+            return true;
         }
-        external
+        if saw_any && !saw_ours {
+            self.note_foreign(false);
+            return true;
+        }
+        false
+    }
+
+    /// 外部トラフィックを記録: 受動モードを延長し、`disarm` 時は武装中の
+    /// 軸ストリームを非軸コマンドで解除する (実機検証: 任意の非軸コマンドで
+    /// ~28fps の自律配信が止まる)。武装したままだと公式 HUB の読み出しが
+    /// 全滅するため。
+    fn note_foreign(&self, disarm: bool) {
+        *self.axis_passive.lock().unwrap_or_else(|p| p.into_inner()) =
+            Instant::now() + Duration::from_secs(8);
+        let was_armed = disarm
+            && std::mem::replace(
+                &mut *self.axis_armed.lock().unwrap_or_else(|p| p.into_inner()),
+                false,
+            );
+        if was_armed {
+            // [4,1,1,1] = GetPerformance(row1,col1) — 無害な通常読み出し。
+            self.ch
+                .send(&[grp::PERFORMANCE, sub::GET_PERF, 1, 1])
+                .ok();
+        }
     }
 
     /// `[4,3,kind,row]` → 30×u16 LE (mm×1000)。kind: axis::* (ADC=0,Route=1,Calibrate=2,KeyStatus=3)。
@@ -783,6 +816,8 @@ impl XsydDriver {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .insert((kind, row), Instant::now());
+        // 有効な軸要求はデバイス側の自律ストリームを武装する。
+        *self.axis_armed.lock().unwrap_or_else(|p| p.into_inner()) = true;
         let wait_ms = if probing { PROBE_WAIT_MS } else { DEADLINE_MS };
         let deadline = Instant::now() + Duration::from_millis(wait_ms);
         while Instant::now() < deadline {
@@ -811,9 +846,8 @@ impl XsydDriver {
                         return Err(HubError::Unsupported("command"));
                     }
                     if (1..=13).contains(&b[0]) {
-                        // 軸以外の既知応答 = 別クライアントの会話 → 受動化。
-                        *self.axis_passive.lock().unwrap_or_else(|p| p.into_inner()) =
-                            Instant::now() + Duration::from_secs(3);
+                        // 軸以外の既知応答 = 別クライアントの会話 → 受動化+解除。
+                        self.note_foreign(true);
                     }
                 }
                 Err(HubError::Protocol(_)) => {}
@@ -2642,9 +2676,11 @@ impl DeviceDriver for XsydDriver {
     /// 受信キューに混入して設定値を化けさせるのを防ぐ)。
     fn live_axis(&self) -> HubResult<Vec<AxisSample>> {
         self.drain_axis(4);
-        let passive = *self.axis_passive.lock().unwrap_or_else(|p| p.into_inner())
-            > Instant::now();
+        // axis_row の待機中にも外部検出し得るので、read 内部で毎回評価する。
+        let is_passive =
+            || *self.axis_passive.lock().unwrap_or_else(|p| p.into_inner()) > Instant::now();
         let read = |row: u8, kind: u8| -> HubResult<[u16; 30]> {
+            let passive = is_passive();
             // Route/KeyStatus は毎ポーリング更新、ADC/Calibrate は緩め
             // (要求総量を減らして公式 HUB との併用を穏やかにする)。
             let fresh = match kind {
@@ -3030,8 +3066,13 @@ mod tests {
         let mut f = vec![3u8, 1];
         f.resize(64, 0);
         d.ch.mock_reply(&f);
+        *d.axis_armed.lock().unwrap() = true;
         assert!(d.drain_axis(5));
         assert!(*d.axis_passive.lock().unwrap() > Instant::now());
+        // 武装中だったので解除コマンド [4,1,1,1] が一度だけ出ている。
+        let sent = d.ch.mock_sent();
+        assert!(sent.iter().any(|s| s.as_slice() == [4, 1, 1, 1]));
+        assert!(!*d.axis_armed.lock().unwrap());
     }
 
     #[test]
@@ -3412,6 +3453,7 @@ mod tests {
             axis_cache: Mutex::new(HashMap::new()),
             axis_self: Mutex::new(HashMap::new()),
             axis_passive: Mutex::new(Instant::now() - Duration::from_secs(1)),
+            axis_armed: Mutex::new(false),
         }
     }
 
