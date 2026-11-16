@@ -389,9 +389,15 @@ pub struct Shell {
     pub auto_form: crate::pages::auto::AutoForm,
 
     toast_timer: bool,
-    /// 自窓の HWND — 最小化中にワーキングセットを OS へ返すために使う。
+    /// 自窓の HWND — 最小化/背面中にワーキングセットを OS へ返すために使う。
     #[cfg(windows)]
     hwnd: isize,
+    /// メモリ優先度を下げているか (背面・最小化中に立てる)。
+    #[cfg(windows)]
+    mem_low: bool,
+    /// 背面に入ってからのティック数 (再トリム間隔用)。
+    #[cfg(windows)]
+    mem_ticks: u32,
     /// 窓が前面にあるか (render で毎フレーム更新)。
     /// 背面では Windows 11 が raw input 配信を制限するため、ポーリング実測の
     /// 表示はこのフラグで信用できるかを出し分ける。
@@ -480,7 +486,7 @@ impl Shell {
                         if ticks.is_multiple_of(15) {
                             this.hub.poll_battery();
                         }
-                        this.trim_if_minimized();
+                        this.mem_tick();
                     })
                     .is_ok();
                 if !alive {
@@ -645,6 +651,10 @@ impl Shell {
             toast_timer: false,
             #[cfg(windows)]
             hwnd: window_hwnd(window),
+            #[cfg(windows)]
+            mem_low: false,
+            #[cfg(windows)]
+            mem_ticks: 0,
             last_window_active: true,
             poll_meas_end: None,
             poll_meas_result: None,
@@ -1962,24 +1972,68 @@ fn window_hwnd(window: &Window) -> isize {
 }
 
 impl Shell {
-    /// 最小化中はワーキングセットを OS に返す (2 秒ティックから呼ぶ)。
-    /// 復帰時にページフォルトで戻るので体感コストはほぼ無いが、
-    /// タスクマネージャで見える常駐メモリが最小化中だけ大きく下がる。
+    /// メモリ管理 (2 秒ティックから呼ぶ)。
+    /// - 最小化中: 毎回ワーキングセットを OS に返す (描画が止まるので ~5MB に縮む)。
+    /// - 背面 (非アクティブ) 中: 遷移時に一度トリム + メモリ優先度を
+    ///   BELOW_NORMAL に下げ、60 秒おきに再トリム。
+    ///   背面でも 250ms 間隔で描画が走るので毎回トリムすると
+    ///   ページフォルトの往復で churn になる — 優先度を下げておくと
+    ///   OS がメモリ不足時にこのプロセスから優先的に回収する。
+    /// - 前面に戻ったら優先度を NORMAL に戻す。
     #[cfg(windows)]
-    fn trim_if_minimized(&self) {
+    fn mem_tick(&mut self) {
         use windows::Win32::Foundation::HWND;
-        use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
+        use windows::Win32::System::Threading::{
+            GetCurrentProcess, SetProcessInformation, SetProcessWorkingSetSize,
+            MEMORY_PRIORITY_BELOW_NORMAL, MEMORY_PRIORITY_INFORMATION, MEMORY_PRIORITY_NORMAL,
+            ProcessMemoryPriority,
+        };
         use windows::Win32::UI::WindowsAndMessaging::IsIconic;
         if self.hwnd == 0 {
             return;
         }
+        let iconic = unsafe { IsIconic(HWND(self.hwnd as _)).as_bool() };
+        let inactive = iconic || !self.last_window_active;
         unsafe {
-            if IsIconic(HWND(self.hwnd as _)).as_bool() {
+            let trim = || {
                 let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+            };
+            if inactive {
+                if !self.mem_low {
+                    self.mem_low = true;
+                    let mpi = MEMORY_PRIORITY_INFORMATION {
+                        MemoryPriority: MEMORY_PRIORITY_BELOW_NORMAL,
+                    };
+                    let _ = SetProcessInformation(
+                        GetCurrentProcess(),
+                        ProcessMemoryPriority,
+                        &mpi as *const _ as *const _,
+                        std::mem::size_of::<MEMORY_PRIORITY_INFORMATION>() as u32,
+                    );
+                    trim(); // 遷移時に一度切り詰める
+                    self.mem_ticks = 0;
+                }
+                self.mem_ticks += 1;
+                if iconic || self.mem_ticks >= 30 {
+                    self.mem_ticks = 0;
+                    trim();
+                }
+            } else if self.mem_low {
+                self.mem_low = false;
+                self.mem_ticks = 0;
+                let mpi = MEMORY_PRIORITY_INFORMATION {
+                    MemoryPriority: MEMORY_PRIORITY_NORMAL,
+                };
+                let _ = SetProcessInformation(
+                    GetCurrentProcess(),
+                    ProcessMemoryPriority,
+                    &mpi as *const _ as *const _,
+                    std::mem::size_of::<MEMORY_PRIORITY_INFORMATION>() as u32,
+                );
             }
         }
     }
 
     #[cfg(not(windows))]
-    fn trim_if_minimized(&self) {}
+    fn mem_tick(&mut self) {}
 }
