@@ -843,9 +843,13 @@ JS 解析のみ (実機では使えず):
 | 1 | 読 | ドングル EID/PR `[1,0,0,0,8,rand×4]` → `b[10]`/`b[11]` |
 | 4 (通知) | ← | デバイス自律通知 `[4,type,...]` (下記) |
 
-**通知フレーム `[4,type,...]`** (UI ハンドラ実測):
+**通知フレーム `[4,type,...]`** (UI ハンドラ実測 + 実機観測):
+- **実機確認 — 有線では `if1 up=FFA0 u=01` の input report に流れる**
+  (feature 経路ではなく)。プロファイル切替で `[04,02,02]` (type2,
+  b[2]=新profile) と `[04,08,01]` (type8, b[2]=そのprofileのrate生値)
+  が push された。
 - type1 = DPI切替 `b[2]=stage, b[3..4]=X dpi, b[5..6]=Y dpi`
-- type2 = プロファイル切替, type3 = 電池 `b[2]=%, b[3]=充電`
+- type2 = プロファイル切替 `b[2]=新profile`, type3 = 電池 `b[2]=%, b[3]=充電`
 - type6 = 接続/切断 `b[2]=1/0`, type7 = LOD `b[2]=生値`
 - type8 = ポーリング `b[2]=生値`, type13 = モード `b[2]=HighSpeed, b[3]=tracking`
 
@@ -982,8 +986,8 @@ SetLightness `[0,dev,3,2,2,r,n,o]` / GetLightness `[0,dev,3,2,130,r,n]`。
 - `hidIndex=0` 確定 (実機応答は先頭 0x00 のみ、ずれなし)。
 - 16B 経路はこの有線モデルでは存在しない → §5.3/5.4 の EEPROM 手順は
   8K ドングル (`37B0:0048`) や旧リビジョン用として残す。
-- 自律通知 `[4,type,…]` フレームは feature 経路では観測せず
-  (800ms passive listen で無) — 16B 入力レポート側に出る可能性。
+- 自律通知 `[4,type,…]` は **`if1 FFA0:01` input report** で実機観測
+  (プロファイル切替で type2=02 + type8=01 が push)。feature 経路には出ない。
 - WebHID のコレクション選択基準: `collections[0].featureReports[0].items[0]
   .reportCount==64` — if2 `FFFF:00` が該当 (実機で唯一 feature を応答)。
 - **書込み永続性は実機確認済み** — 探査中に設定領域が壊れた際、抜き差し
@@ -1012,3 +1016,28 @@ SetLightness `[0,dev,3,2,2,r,n,o]` / GetLightness `[0,dev,3,2,130,r,n]`。
   SpeedEnable・MotionSync・SensorOffset・ScrollHP・GlassMode・
   ボタン get/set は実機往復確認済み。
 - FW 更新は enterBL → erase → program (.hex、BL=37B0:0044) — 未実装でよい。
+
+### 5.7 ドライバ実装サマリ (lamzu.rs 用)
+
+有線 LM20 で確定済みの最小実装:
+
+- **検出**: VID `37B0`, PID `0044` (Maya X V2/LM20), if2 `FFFF:00`。
+  環境表では `001F`=別リビジョン (MayaX V2, DPI 30000) と `0048`=8K ドングル —
+  PID で caps を分けることはせず、センサー型番 cmd143 と env 値で DPIMax を決める。
+- **open**: if2 コレクションを feature-report 64B で開く。`hidIndex=0`。
+  devID は読みたいプロファイル番号 (1-based)。
+- **応答検証**: `a[1]==0xA1` 必須 (a2/a3 は拒否/空)。`a[6]`=cmd echo で照合。
+  `a[4]` は応答ペイロード長。値は `a[8]` 基準。
+- **読み出し**: 全スカラーは cmd128系 get (`sub,f,cmd` は §5.5 表)。
+  ボタンは `[2,15,3,128,dev,btn,0,255,10]` → `[type,len,param]` at a[10..];
+  **エントリ空なら echo が返る**ので type=0xff で「未設定」と扱う。
+  DPI ステージは sub10/cmd129 一括、profile は cmd133→a[7]。
+- **書き込み**: set 即時適用+flash 永続 (save 不要)。アイドル数秒で確実に
+  コミットされると考えられるが、書込み直後の読み戻しは RAM 値を返すので
+  検証は数秒後 or 再オープンで行うのが安全。
+- **危険操作**: マクロ確保/削除・広範な不正引数は設定領域を破壊し得る
+  (実機で再現 → `defaultDevice` でしか復旧しない)。
+  `resetProfile [2,1,0,13,dev]` は安全なプロファイル初期化として利用可。
+- **通知フレーム**: **`if1 FFA0:01` の input report を subscribe**
+  (実機確認 — プロファイル切替で type2+type8 が届いた)。HubEvent 用。
+- **未実装でよい**: FW 更新・マクロ・ライト set (get は実装可)・EID/PID 書込み。
