@@ -930,9 +930,14 @@ get/set は cmd が +0x80/同一値の関係。`devID` はプロファイル番�
 | - | - | 192/- | defaultDevice 工場リセット `[0,t,2,0,0,0,192,{1|2}]` | - |
 | 2 | 1 | -/13 | resetProfile `[2,1,0,13]` | - |
 
-**ボタン get/set 詳細** (実機読出 + JS enum 確定):
+**ボタン get/set 詳細** (実機 + JS enum 確定):
 送信 `sub=5+len`, `[dev,btn,0,type,len,param…]`, get は cmd128+type=255+len=10。
-応答 `c[10]`=type, `c[11]`=len, `c[12..]`=param (実機: 全ボタン type1 param=自身番号)。
+JS は応答 `c[10]`=type, `c[11]`=len, `c[12..]`=param を期待するが、
+**実機 (FW 0.0.3.0) では read がリクエスト echo のみ返す** (c[9..11]=req[8..10])。
+工場初期状態では一度だけ格納値 (type1 param=自身番号) が返ったが、その後は
+type/d8/len/sub/f 全変形・16B 埋め込み・if1・input report を試しても echo のみ。
+公式 HUB 実通信の USB キャプチャか公式側表示との対比が必要。
+set は JS 形で a1-ack する (書込み受理は確認)。
 
 **type (`vue` enum)**: 0=OFF, 1=ButtonCode, 2=X_Click, 4=KeyboardCode,
 5=ConsumerKeys, 6=PowerKeys, 7=DPI, 8=Profile, 9=FN, 10=Tilt, 12=BatButton,
@@ -977,9 +982,18 @@ SetLightness `[0,dev,3,2,2,r,n,o]` / GetLightness `[0,dev,3,2,130,r,n]`。
   (800ms passive listen で無) — 16B 入力レポート側に出る可能性。
 - WebHID のコレクション選択基準: `collections[0].featureReports[0].items[0]
   .reportCount==64` — if2 `FFFF:00` が該当 (実機で唯一 feature を応答)。
-- 未検証 (JS 確定・実機未往復): ボタン set 各 type、マクロ確保/転送/削除、
-  ライト effect/輝度、AdaptiveDPI 書込み、スリープ・デバウンス・AngleTune・
-  Tracking・DPI-XY・SensorOffset・SpeedEnable・ScrollHP・GlassMode・
-  ButtonCombine の書込み、プロファイル切替、EID/PID 書込み、
-  電源再投入後の永続性 (ポーリング等の往復は電源内で確認済み)。
+- **書込み永続性は実機確認済み** — 探査中に設定領域が壊れた際、抜き差し
+  (電源再投入) 後も壊れた値が残った → 64B feature 書込みは flash 永続。
+  同時に判明: **マクロ確保/削除・プロファイル系コマンドは設定領域と
+  共有ページを巻き込み得る** (rate=0・LOD=2・hyper=0x4d・ripple=0x22・
+  stage count=2 に化けた) — 探査では送らない方が安全。
+  破壊後は既知の元値を書き戻して復元可能 (p1: rate0x80/stage3/LOD0x87/
+  hyper1/ripple0/track1/5ステージ400-6400 + p2/p3: rate1/stage2/5ステージ)。
+- 未検証 (JS 確定・実機未往復): ボタン read 格納値の取得 (echo のみ)、
+  ボタン set の物理動作、マクロ確保/転送/削除 (危険のため中止)、
+  ライト effect/輝度、AdaptiveDPI 書込み、AngleTune・SensorOffset・
+  ScrollHP・GlassMode・ButtonCombine・DPIインジケータ色の書込み、
+  EID/PID 書込み。スリープ・デバウンス・Tracking・DPI-XY・SpeedEnable は
+  set→get 往復確認済み。プロファイル切替 (cmd5) は ack するが
+  切替後の再読み込み挙動は未確認。
 - FW 更新は enterBL → erase → program (.hex、BL=37B0:0044) — 未実装でよい。
