@@ -1007,8 +1007,10 @@ SetLightness `[0,dev,3,2,2,r,n,o]` / GetLightness `[0,dev,3,2,130,r,n]`。
 - **破壊からの復旧手順** (実機で実施): `defaultDevice` → 再列挙待ち →
   各プロファイルに元値を書き戻し → アイドル数秒 → 読み戻し検証。
 - 未検証 (JS 確定・実機未往復): マクロ確保/転送/削除 (危険のため中止 —
-  上記破壊の最有力原因)、ライト effect/輝度の set (get は実機確認済:
-  effect=0 は a2 空応答、1/2/4/5 は a1+effect echo、lightness r1=0xa9)、
+  上記破壊の最有力原因; GetMacroDataSize は安全でスロット0-2全て a2=空
+  と実機確認)、ライト effect/輝度の set (get は実機確認済: effect=0 は
+  a2 空応答、1/2/4/5 は a1+effect echo、lightness r1=現在0xff=最大輝度;
+  JS 形 `[r,n,o]` set は a2 拒否 → 引数意味が異なる可能性)、
   AdaptiveDPI 書込み (get は実機確認済: a[4]=0x22 で曲線ペアデータ有り)、
   EID/PID 書込み。
   プロファイル切替 `[2,1,0,5,prof]` も往復確認 (get は `a[7]`=現行、
