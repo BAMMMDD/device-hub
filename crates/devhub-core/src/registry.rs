@@ -178,6 +178,21 @@ pub const KNOWN: &[KnownDevice] = &[
         driver: DriverKind::Lamzu,
         verified: true,
     },
+    // LAMZU Orbital 8K ドングル (37b0:0048) — 同じ FFFF:00 feature /
+    // FFA0:01 通知レイアウトでマウス設定を中継する (実機列挙で確認)。
+    KnownDevice {
+        vid: 0x37B0,
+        pid: 0x0048,
+        usage_page: Some(0xFFFF),
+        usage: Some(0x00),
+        kind: DeviceKind::Mouse,
+        vendor: "LAMZU",
+        model: "lamzu-dongle",
+        name: "LAMZU ワイヤレスドングル",
+        transport: Transport::Wireless24G,
+        driver: DriverKind::Lamzu,
+        verified: true,
+    },
 ];
 
 /// 列挙結果 (VID/PID/usage) に合う既知デバイス。`0xFFFF` のプレースホルダは一致しない。

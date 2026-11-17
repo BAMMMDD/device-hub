@@ -10,11 +10,12 @@ use devhub_hid::transport;
 
 fn main() {
     let api = transport::open().expect("hidapi");
+    // 有線 0044 優先、無ければ Orbital 8K ドングル 0048 (同じ feature 経路)。
     let info_raw = api
         .device_list()
         .find(|d| {
             d.vendor_id() == 0x37b0
-                && d.product_id() == 0x0044
+                && (d.product_id() == 0x0044 || d.product_id() == 0x0048)
                 && d.usage_page() == 0xffff
                 && d.usage() == 0
         })
@@ -27,8 +28,12 @@ fn main() {
         vendor: "LAMZU".into(),
         model: "maya-x-v2".into(),
         vid: 0x37b0,
-        pid: 0x0044,
-        transport: Transport::Wired,
+        pid: info_raw.product_id(),
+        transport: if info_raw.product_id() == 0x0048 {
+            Transport::Wireless24G
+        } else {
+            Transport::Wired
+        },
         firmware: None,
         dongle_firmware: None,
         serial: None,
