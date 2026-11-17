@@ -162,6 +162,22 @@ pub const KNOWN: &[KnownDevice] = &[
         driver: DriverKind::Atk,
         verified: true,
     },
+    // ---------------------------------------------------------------- マウス (lamzu.net)
+    // LAMZU Maya X V2 (LM20) 有線 — 実機列挙 37b0:0044。
+    // 設定 = if2 FFFF/00 の 64B feature report、通知 = if1 FFA0/01 input report。
+    KnownDevice {
+        vid: 0x37B0,
+        pid: 0x0044,
+        usage_page: Some(0xFFFF),
+        usage: Some(0x00),
+        kind: DeviceKind::Mouse,
+        vendor: "LAMZU",
+        model: "maya-x-v2",
+        name: "LAMZU Maya X V2",
+        transport: Transport::Wired,
+        driver: DriverKind::Lamzu,
+        verified: true,
+    },
 ];
 
 /// 列挙結果 (VID/PID/usage) に合う既知デバイス。`0xFFFF` のプレースホルダは一致しない。

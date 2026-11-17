@@ -783,9 +783,12 @@ firmwareMark:"f1", upgradeTogether:true, BottomButton:false, DpiRgb:false, DpiTo
 
 ## 5. LAMZU Aurora (www.lamzu.net) — Maya X V2 (LM20) 実機検証済み
 
-解析: `analysis/lamzu-index-*.js` (バンドル), `analysis/lamzu-env-models.json`
-(デバイス定義テーブル、27機種) + **実機プローブ** (`lamzuprobe` example、
-有線 37b0:0044 で読み書き往復検証済み)。
+2026-11-17 再照合: [公式 Aurora](https://www.lamzu.net/#/project/items) の
+[機種定義](https://www.lamzu.net/Config/env-models.json) は v1.0.38。設定の共通処理
+(`analysis/lamzu-index-DxSz_fAU.js`) と設定画面 (`analysis/lamzu-index-Bn9q780G.js`)
+を含め、取得した配布ファイルは保存済みスナップショットとバイト単位で一致。
+有線 `37B0:0044` / FW `0.0.3.0` の読み取りは `lamzuprobe` で再現できる。
+過去の書き込み検証と今回の読み取り確認は区別する。
 
 ### 5.1 デバイス識別 (env-models.json + 実機)
 
@@ -799,9 +802,11 @@ firmwareMark:"f1", upgradeTogether:true, BottomButton:false, DpiRgb:false, DpiTo
   `DPIMaxStageNum: 5`, 5ボタン, `LightEffects: "1,2,4,5"`,
   `SleepTimeGrade: 1min;5min;10min;15min;20min;25min` (10s系ではない)。
 - センサー型番コマンド応答 `4` → **PAW3955** (JS: 1=3395, 2=3950, 4=3955。
-  3955 時 LOD 候補 `0.7;1;1.3;1.5;1.7` に拡張、DPIMax 50000)。
-- プロファイル 4 個 (UI 固定 1..4)、devID = **プロファイル番号 (1-based)**。
-  `devID=0` を送ると応答タグが a2/a3 になり値がゼロ — devID は必須。
+  3955 時 LOD 候補は `0.7;1;1.3;1.5;1.7`、DPI は 50–50000、1 刻み)。
+  `GetDPIMax` (`f=1,cmd=140`) は引数なしで `A3` を返したため、上限は公式機種定義とセンサー判定を使う。
+- プロファイル枠は UI 固定 1–4、`devID` = **プロファイル番号 (1-based)**。
+  枠が表示されても、実機で初期化済みとは限らない (§5.6)。プロファイルごとのコマンドでは
+  `devID=0` を送ると拒否されることがある。FW・電池・センサー・Glass Mode などは別レイアウト。
 - 他機種行も同形式 (Maya/Maya X/MayaX V2(001F)/Orcus/Atlantis/Thorn 等)。
 
 ### 5.2 トランスポート — 実機では 64B フィーチャーのみ
@@ -810,21 +815,25 @@ firmwareMark:"f1", upgradeTogether:true, BottomButton:false, DpiRgb:false, DpiTo
 
 - if0 `0001:02` マウス / if1 `000C:01`・`0001:80`・`0001:06`・`FFA0:01`・`FFFF:01`
   / **if2 `FFFF:00`** ← 設定チャネルはこれ。
-- **全コレクションで output report 不存在** (rid 0-16 × size 2-70 の
-  `write` が全て失敗) → JS の 16B `sendReport(8,…)` 経路はこの有線モデルでは
-  使えない。おそらく 8K ドングル側専用 (未検証)。
+- 過去の実機検証では全コレクションで output report の送信に失敗し、公式コードも
+  `37B0` には 64B feature ヘルパーを選ぶ。16B `sendReport(8,…)` は別実装。
+  `0048` の 8K ドングルも公式コードでは同じ 64B ヘルパーを選び、
+  マウス FW には target `2`、受信機 FW には target `0` を使う。ペア済みマウスは
+  `GetDevicePID` の応答で識別する。`0048` は複数の LM20 モデルで共通、実機未検証。
 - **全設定は 64B フィーチャーチャネル**: `send_feature_report(buf65=rid0+64B)`
   → `get_feature_report` で応答 (~10-30ms、120ms sleep + 1 read で安定)。
 - 送信フレーム (JS 準拠): `data[2]=2, data[3]=sub, data[4]=f, data[5]=cmd,
   data[6]=devID, data[7..]=args` (ライト系のみ `data[2]=devID`)。
-- 応答フレーム (実測 hidIndex=0): `a[1]=0xA1`=正常 ack (0xA2/0xA3 = 別 ack 種別、
-  devID=0 や無効引数で返る), `a[4..5]`=f,sub エコー, **`a[6]`=cmd エコー**,
-  **`a[7]`=devID エコー, `a[8]`=値**。
+- 応答フレーム (Windows hidapi, 実測 `hidIndex=0`): `a[0]`=report ID 0、
+  `a[1]`=ステータス (`A1`=ACK)、`a[3]`=通常 `data[2]`、`a[4]`=応答ペイロード長、
+  `a[5]`=f、`a[6]`=cmd。ペイロードは **`a[7..7+a[4]]`**。プロファイル対象の
+  コマンドでは通常 `a[7]` が `devID`、`a[8..]` が値。`a[4]` は送信 `sub` と別物。
+  たとえば DPI 一覧は送信 `sub=10` に対し、5 段の応答では `a[4]=22`。
 - **書き込みは即時適用・別途 save コマンド不要** (set 直後の get で新値を確認、
   polling 2↔128, LOD 1↔0x87, MotionSync 0↔1, activeDPI 1↔3,
   DPI ステージ同値書込み — 全て往復確認)。
 
-### 5.3 16B チャネル コマンド (ドングル/旧リビジョン用 — 0044 有線では未検証・output report 不存在)
+### 5.3 16B チャネル コマンド (別のヘルパー。LM20 には非適用)
 
 JS 解析のみ (実機では使えず):
 
@@ -900,8 +909,9 @@ get/set は cmd が +0x80/同一値の関係。`devID` はプロファイル番�
 | 2 | 1 | 128/0 * | ポーリング (8,4,2,1,32,64,128→125..8000) | `0x80`=8000Hz |
 | 2 | 1 | 136/8 * | LOD (get 生値 / set: mm値、<1→`*10|128`, 1<v<2→BCD) | `0x87`=0.7mm |
 | 2 | 1 | 130/2 * | activeDPI ステージ | 3 (400/800/1600/3200/6400 中 3番目) |
-| 10 | 1 | 129/- | DPI ステージ一覧 get → `a[8]`=数,以後4B/個 X,Y u16BE | 5個 400/800/1600/3200/6400 |
+| 10 | 1 | 129/- | DPI ステージ一覧 get `[dev,6]` → `a[8]`=数,以後4B/個 X,Y u16BE | 5個 400/800/1600/3200/6400 |
 | 26 | 1 | -/1 * | DPI ステージ一括 set `[dev,count,4B×N]` | 同値書込み→一致 |
+| 19 | 2 | 129/1 | DPI ステージ色 get `[dev]` → `a[8..]`=RGB×6 / set `[dev,RGB…]` | 読取確認: `#D00067`, `#00A5D1`, `#0F9B00`, `#FFFFFF`, `#CAC700`。6枠目は予備。set は公式コードのみ |
 | 2 | 1 | 137/9 * | MotionSync | 0→1→0 確認 |
 | 2 | 1 | 132/4 | AngleSnap | 0 |
 | 2 | 1 | 138/10 | Ripple | 0 |
@@ -910,29 +920,29 @@ get/set は cmd が +0x80/同一値の関係。`devID` はプロファイル番�
 | 2 | 1 | 141/13 | DPI XY 個別 | 0 |
 | 2 | 1 | 148/20 | AngleTune 角度 (負値=255-\|v\|+1) | 0 |
 | 2 | 0 | 136/8 | デバウンス | 0 |
-| 2 | 0 | 131/- | 電池 → `[a7,a8]` = (充電?,%) | `[1,100]`=100% |
+| 2 | 0 | 131/- | 電池 (プロファイル引数なし) → `[a7,a8]` = (充電中 `==1`, %) | 今回 `[0,100]`、過去 `[1,100]` |
 | 3 | 0 | 135/7 | スリープ get→`a8<<8|a9` / set u16BE (秒) | 60 (=1min grade) |
 | 1 | 0 | 133/5 | プロファイル get→`a[7]` / set | 1 |
-| 1 | 0 | 130/- | EID → `a[7]`=EID, `a[9..]`=シリアル ASCII | 9, `LZMXU26095581` |
+| 1 | 0 | 130/- | EID → `a[7]`=EID, `a[9..]`=シリアル ASCII | 9 |
 | 1 | 1 | 143/- | センサー型番 (1=3395,2=3950,4=3955) | 4 → PAW3955 |
 | 16 | 0 | 129/- | FW バージョン → `a[7..10]` | **0.0.3.0** (FWファイル名と一致) |
-| 2 | 2 | 132/4 | DPI インジケーター LED | 0 |
-| 3 | 3 | 129/1 | ButtonCombine | 1 |
+| 2 | 2 | 132/4 | DPI インジケーターのスイッチ (LM20 の公式 UI では非表示) | 過去の読取値 0 |
+| 3 | 3 | 129/1 | ButtonCombine (LM20 の公式 UI では非表示) | 過去の読取値 1 |
 | 3 | 1 | 149/21 | SensorOffset (signed, 値は a[9]/o[8]) | 0 |
-| 3 | 0 | 154/26 | SpeedEnable (移動中LED消灯等の配列) | 1 |
-| 4 | 0 | 153/25 | ScrollHP (高精度ホイール) | `a[10]=0xC8` 等 |
-| 9 | 1 | 154/26 * | AdaptiveDPICurve — get→`a[8]`=enable,`a[12]`=個数,`a[13..]`=(u16BE speed,dpi)×N / set `[dev,en,0,N,data]` sub=4+len | en=0, N=3 (0,100)(20,100)(40,100) |
+| 3 | 0 | 154/26 | SpeedEnable (左右それぞれの連打機能) → `a[8]=左`, `a[9]=右`、set `[dev,L,R]` | 左 ON / 右 OFF |
+| 4 | 0 | 153/25 | ScrollHP (B-hop) → `a[8]`=方向 (0=OFF,2=上,3=下), `a[9..11]`=時間 u16BE (200/400/600/800/1000 ms)、set `[dev,方向,u16BE 時間]` | OFF、200 ms |
+| 9 | 1 | 154/26 * | AdaptiveDPICurve — get→`a[8]`=enable,`a[12]`=個数,`a[13..]`=(u16BE 速度, u16BE 倍率×100)×N / set `[dev,en,0,N,data]` sub=4+len | OFF、N=3、速度 0/20/40、全て 1.00 倍 (過去・今回とも同値書込みのみ) |
 | 1 | 1 | 142/14 | GlassMode (値は a[7]、devID 無し) | 0 |
-| 6 | 4 | 129/- | GetMacroDataSize `[dev,slot]` → a[8..] u32 | 0 |
-| 6 | 4 | -/1 | AllocateMacro `[dev, u16 slot, u32 size]` | - |
-| 0 | 4 | 131/3 | MacroData get/set `[dev,slot,u32 addr,u8 len,data]` sub=7+len | - |
-| 2 | 4 | -/2 | DeleteMacro `[dev,u16 slot]` | - |
-| 0 | 3 | 128/0 * | ボタン get/set — sub=5+len, `[dev,btn,0,type,len,params]` | 全5個 type1 (既定マウスボタン) |
-| 1 | 6 | 139/- | GetDeviceVID/PID `[0,2]` → a[9..12] | `02`…(要調整) |
-| 1 | 16 | 129/- | GetUSBPID → a[11..12] | - |
+| 6 | 4 | 129/- | GetMacroDataSize `[u16BE slot]` → `a[9..13]`=u32BE サイズ (公式コード) | 正しいフレームでの有効スロット未確認 |
+| 6 | 4 | -/1 | AllocateMacro `[u16BE slot,u32BE size]` | 公式コードのみ |
+| 7+len | 4 | 131/3 | MacroData get/set `[u16BE slot,u32BE offset,u8 len,data…]` (get は末尾 data なし) | 公式コードのみ |
+| 2 | 4 | -/2 | DeleteMacro `[u16BE slot]` | 公式コードのみ |
+| 5+len | 3 | 128/0 * | ボタン get/set `[dev,btn,0,type,len,params]` | 全5個 type1 (既定マウスボタン) |
+| 6 | 0 | 139/- | GetDevicePID、target `1`、引数 `[2]` → `a[9..11]`=VID、`a[11..13]`=PID (u16BE) | ドングルでのペア済み機種識別。公式コードのみ |
+| 16 | 0 | 129/- | GetUSBPID、target `1` → `a[11..13]`=PID (u16BE) | 公式コードのみ |
 | - | - | 176/- | enterBL `[0,t,1,0,176]` / exitNormal `…,4,1` | - |
 | 2 | 0 | -/0 | defaultDevice 工場リセット `[2,2,0,0,192,1]` * | 全プロファイル初期化・実機確認 |
-| 2 | 0 | -/13 | resetProfile `[2,1,0,13,dev]` * | dev プロファイル領域を工場初期化・実機確認 |
+| 1 | 0 | -/13 | resetProfile `[2,1,0,13,dev]` * | dev プロファイル領域を工場初期化・実機確認 |
 
 **ボタン get/set 詳細** (実機 + JS enum 確定・往復確認済み):
 送信 `sub=5+len`, `[dev,btn,0,type,len,param…]`, get は cmd128+type=255+len=10。
@@ -963,38 +973,32 @@ get/set は cmd が +0x80/同一値の関係。`devID` はプロファイル番�
 - 20=HPMode `[0]`
 - 15=Paring (ペアリング), 19=Lighting, 12=BatButton, 10=Tilt, 9=FN, 6=PowerKeys
 
-**マクロ** (64B 専用領域、EEPROM@768 ではない): Allocate `[2,6,4,1,u16 slot,
-u32 size]`→a[1]==161; GetSize `[2,6,4,129,u16 slot]`; Data set `[2,0,4,3,u16 slot,
-u32 addr,u8 len,data]` sub=7+len; Data get `[2,0,4,131,…]`; Delete `[2,2,4,2,u16 slot]`。
-実機 GetMacroDataSize(0) → size=0 (未割当)。
+**マクロ**: 64B 専用領域。`slot` はデバイス共通の u16BE で、プロファイル番号は付かない。
+公式画面は最大 50B ずつ転送し、GetMacroData の `a[14..]` にあるデータを連結する。
+過去の `A2` 応答は要求に余計なプロファイル番号を含めていたため、
+スロット 0–2 が空だとする根拠には使えない。有効なマクロの読取・書込は実機未検証。
 
-**ライト** (`LightDeviceID=1`, dev は通常通り body[2] — JS `i[2]=t`):
-- GetLightness `[0,0,1,3,2,130,profile,n]` → `a[9]`=輝度0-255 *実機確認*
-- SetLightness `[0,0,1,3,2,2,profile,n,bright]` → a1 受理 *実機確認 (同値書込)*
-- GetLightEffect `[0,0,1,5+s,2,128,profile,effect]` → a[8..12]=4 params +
-  a[12..]=色バイト。s=期待色数。実機: 1/2/4/5 は a1、effect=0 は a2、
-  但し params が全0 (この有線機は RGB 非実装の可能性 — env の
-  `EffectList=1,2,4,5` はドングル側かも)
-- SetLightEffect `[0,0,1,5+len,2,0,profile,effect,speed,bright,color,count,rgb…]`
-  (JS 確定・実機未往復)
+**ライト**: LM20 の `LightEnablePID` は空で、公式画面は独立した RGB エフェクトを表示しない。
+`LightEffects=1,2,4,5` や `LightDeviceID=1` が定義されていても有効化されない。
+過去の輝度プローブには公式と異なる target 位置での要求や拒否応答があり、
+物理的な発光や設定値の変更を確認できていない。**DPI 段の RGB 色** (`f=2,cmd=129/1`) は
+別機能で、公式 UI に表示され、今回の実機で色を読み取れた。
 
 ### 5.6 留意点 (実機追記)
 
-- **devID=プロファイル番号は必須** — 0 を送ると a2/a3 ack で値がゼロに化ける。
-- 応答タグ `a[1]`: `0xA1`=正常 / `0xA2`,`0xA3`=別 ack (devID=0・引数無効・
-  一部コマンド・空マクロスロット等)。JS は `a[1]==161` を成功判定に使う。
-- **`a[4]` は応答ペイロード長** (sub の echo ではない) — スカラー応答は 2-3、
-  ボタン 0x0f、EID 0x16(22)、AdaptiveDPI 0x22(34) 等、データ量に応じて変わる。
-- 応答レイアウト再整理: `a[0]`=0, `a[1]`=tag, `a[2]`=dev(ライト系)/0, `a[3]`=b2,
-  `a[4]`=payload len, `a[5]`=f, `a[6]`=cmd(+0x80 で get), `a[7]`=devID,
-  `a[8..]`=値。
-- `hidIndex=0` 確定 (実機応答は先頭 0x00 のみ、ずれなし)。
-- 16B 経路はこの有線モデルでは存在しない → §5.3/5.4 の EEPROM 手順は
-  8K ドングル (`37B0:0048`) や旧リビジョン用として残す。
-- 自律通知 `[4,type,…]` は **`if1 FFA0:01` input report** で実機観測
-  (プロファイル切替で type2=02 + type8=01 が push)。feature 経路には出ない。
-- WebHID のコレクション選択基準: `collections[0].featureReports[0].items[0]
-  .reportCount==64` — if2 `FFFF:00` が該当 (実機で唯一 feature を応答)。
+- **ACK と値の妥当性は別**。今回、最初は p1–p3 を読めたが、p4 が `A1` で無効な rate `0` を返し、
+  DPI テーブルの宣言長が受信サイズを超えた。再取得では p1–p3 の応答も一時的に異常になり、
+  p4 の DPI テーブル取得で Windows HID エラー `0x1F` が出た。後続の p1 単独取得は正常。
+  原因と p2/p3 の永続状態は未確定。p4 に対してプロファイル切替・初期化・書込みは実施していない。
+  **有効中のプロファイルから読み、未初期化の枠を一括走査しない**。宣言長、コマンド群、
+  コマンド ID、対象番号、値域を確認し、異常値で最後に読めた有効な設定を上書きしない。
+- 2026-11-17 の p1 正常応答: [生フレーム](../crates/devhub-hid/fixtures/lamzu/lm20-wired-active.txt)。
+  8,000 Hz **設定値** (レポート間隔の実測ではない)、DPI 3/5 = 1600、LOD 0.7 mm、
+  5 ボタンとも標準割当。Adaptive DPI は最初の既存プローブで同値書込み・再読一致を確認。
+  それ以降は GET だけ。再現: `cargo run -p devhub-hid --example lamzuprobe -- --details`。
+- `A2` / `A3` を成功や空スロットに読み替えない。公式 WebHID は全コレクションを走査し、
+  `featureReports` の `items[0].reportCount==64` と input report ID `4` を別々に探す。
+  有線の実機ではそれぞれ if2 `FFFF:00` と if1 `FFA0:01`。
 - **書込み永続性は実機確認済み** — 探査中に設定領域が壊れた際、抜き差し
   (電源再投入) 後も壊れた値が残った → 64B feature 書込みは flash 永続。
 - **設定領域の破壊と復旧** (実機で完走):
@@ -1011,14 +1015,10 @@ u32 addr,u8 len,data]` sub=7+len; Data get `[2,0,4,131,…]`; Delete `[2,2,4,2,u
     5ステージ・ボタン=type1 自身・MotionSync=1・HyperMode p1=0x64??(不安定値)。
 - **破壊からの復旧手順** (実機で実施): `defaultDevice` → 再列挙待ち →
   各プロファイルに元値を書き戻し → アイドル数秒 → 読み戻し検証。
-- 未検証 (JS 確定・実機未往復): **マクロ確保/転送/削除のみ** (危険のため
-  中止 — 上記破壊の最有力原因; GetMacroDataSize は安全でスロット0-2
-  全て a2=空と実機確認)、SetLightEffect (lightness get/set は往復確認済)、
-  EID/PID 書込み、ScrollHP・SensorOffset の書込み (get 確認済)。
-  プロファイル切替 `[2,1,0,5,prof]` も往復確認 (get は `a[7]`=現行、
-  切替後の設定保持も確認)。スリープ・デバウンス・Tracking・DPI-XY・
-  SpeedEnable・MotionSync・SensorOffset・ScrollHP・GlassMode・
-  ボタン get/set は実機往復確認済み。
+- 確認度を分ける。ポーリング、LOD、MotionSync、アクティブ DPI、ボタン、プロファイルの
+  切替は過去に値を変えて読み戻し済み。DPI 一覧と Adaptive DPI は同値書込みまで。
+  DPI 色、ScrollHP、SensorOffset などは今回の読み取りで確認したが、書込みは再検証していない。
+  マクロの確保/転送/削除、独立した RGB、ペアリング、EID/PID 書込み、FW 更新、無線は未検証。
 - FW 更新は enterBL → erase → program (.hex、BL=37B0:0044) — 未実装でよい。
 
 ### 5.7 ドライバ実装サマリ (lamzu.rs 用)
@@ -1030,18 +1030,18 @@ u32 addr,u8 len,data]` sub=7+len; Data get `[2,0,4,131,…]`; Delete `[2,2,4,2,u
   PID で caps を分けることはせず、センサー型番 cmd143 と env 値で DPIMax を決める。
 - **open**: if2 コレクションを feature-report 64B で開く。`hidIndex=0`。
   devID は読みたいプロファイル番号 (1-based)。
-- **応答検証**: `a[1]==0xA1` 必須 (a2/a3 は拒否/空)。`a[6]`=cmd echo で照合。
-  `a[4]` は応答ペイロード長。値は `a[8]` 基準。
+- **応答検証**: `a[1]==0xA1` に加え、`a[3],a[5],a[6]` を要求の target/group/command と照合。
+  プロファイル指定の GET なら `a[7]` も比較。`7+a[4] <= 受信長` と、コマンドごとの最小長・値域を検証する。
+  例: DPI ステージ数 1–5、`2+4×段数` の DPI ペイロード、DPI 値 50–50000。
 - **読み出し**: 全スカラーは cmd128系 get (`sub,f,cmd` は §5.5 表)。
   ボタンは `[2,15,3,128,dev,btn,0,255,10]` → `[type,len,param]` at a[10..];
   **エントリ空なら echo が返る**ので type=0xff で「未設定」と扱う。
-  DPI ステージは sub10/cmd129 一括、profile は cmd133→a[7]。
+  DPI ステージと色は別要求。まず cmd133→`a[7]` で有効プロファイルを読み、未使用枠は走査しない。
 - **書き込み**: set 即時適用+flash 永続 (save 不要)。アイドル数秒で確実に
   コミットされると考えられるが、書込み直後の読み戻しは RAM 値を返すので
   検証は数秒後 or 再オープンで行うのが安全。
-- **危険操作**: マクロ確保/削除・広範な不正引数は設定領域を破壊し得る
-  (実機で再現 → `defaultDevice` でしか復旧しない)。
-  `resetProfile [2,1,0,13,dev]` は安全なプロファイル初期化として利用可。
+- **初期化**: `resetProfile` は指定プロファイルの全設定、`defaultDevice` は全設定を消す。
+  無効応答への自動復旧には使わない。マクロは正常なバックアップ・復元を検証するまで保留。
 - **通知フレーム**: **`if1 FFA0:01` の input report を subscribe**
   (実機確認 — プロファイル切替で type2+type8 が届いた)。HubEvent 用。
-- **未実装でよい**: FW 更新・マクロ・ライト set (get は実装可)・EID/PID 書込み。
+- **初期実装の対象外**: 0048 無線、FW 更新、マクロ、独立した RGB、EID/PID 書込み。

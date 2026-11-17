@@ -20,6 +20,8 @@ use std::sync::{Arc, Mutex};
 /// ATK 系ドライバ。診断 example (atkread) からも使うので公開。
 #[doc(hidden)]
 pub mod atk;
+#[doc(hidden)]
+pub mod lamzu;
 #[allow(dead_code)]
 mod mousefit;
 mod mousefit8;
@@ -49,6 +51,7 @@ fn driver_ready(kind: DriverKind) -> bool {
         DriverKind::Mousefit => true,
         DriverKind::Walkplay => true,
         DriverKind::Atk => true,
+        DriverKind::Lamzu => true,
         DriverKind::Unsupported => false,
     }
 }
@@ -220,6 +223,7 @@ impl HubBackend for RealHub {
             DriverKind::Xsyd => Arc::new(xsyd::open(dev, info)?),
             DriverKind::Walkplay => Arc::new(walkplay::open(dev, info)?),
             DriverKind::Atk => Arc::new(atk::open(dev, info, events)?),
+            DriverKind::Lamzu => Arc::new(lamzu::open(dev, info, events)?),
             DriverKind::Unsupported => {
                 return Err(HubError::NotImplemented("このデバイスのドライバ"))
             }
