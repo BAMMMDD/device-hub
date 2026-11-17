@@ -824,6 +824,7 @@ impl MfDongleDriver {
             PollingCycle => (rec(7, 0, 0), None),
             ProfileCycle => return Err(HubError::Unsupported("profile cycle (dongle)")),
             ScrollModeToggle => return Err(HubError::Unsupported("scroll-mode toggle")),
+            Unsupported { .. } => return Err(HubError::Unsupported("raw action")),
         })
     }
 

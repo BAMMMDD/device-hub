@@ -554,6 +554,14 @@ pub enum ButtonAction {
     ProfileCycle,
     /// 上下ロール (ホイール方向) の切替。
     ScrollModeToggle,
+    /// デバイスに記録されているがアプリが解釈できない割当。
+    /// 表示と往復保存はできるが、新規割当の候補には出さない。
+    Unsupported {
+        /// デバイス側の type コード。
+        ty: u8,
+        /// 生パラメータバイト列。
+        params: Vec<u8>,
+    },
 }
 
 /// ボタン割り当てで選べる種類 (デバイスごとに出し分ける)。
@@ -584,6 +592,8 @@ impl ButtonAction {
             ButtonAction::PollingCycle => ButtonActionKind::PollingCycle,
             ButtonAction::ProfileCycle => ButtonActionKind::ProfileCycle,
             ButtonAction::ScrollModeToggle => ButtonActionKind::ScrollModeToggle,
+            // 候補に出さない: 表示用に Disabled として扱う。
+            ButtonAction::Unsupported { .. } => ButtonActionKind::Disabled,
         }
     }
 }

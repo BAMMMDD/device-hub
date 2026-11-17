@@ -789,6 +789,8 @@ firmwareMark:"f1", upgradeTogether:true, BottomButton:false, DpiRgb:false, DpiTo
 を含め、取得した配布ファイルは保存済みスナップショットとバイト単位で一致。
 有線 `37B0:0044` / FW `0.0.3.0` の読み取りは `lamzuprobe` で再現できる。
 過去の書き込み検証と今回の読み取り確認は区別する。
+後続の [アプリ実装監査](LAMZU_MAYA_X_V2_AUDIT.md) では無線 `37B0:0048` を実機確認し、
+ペア先 `37B0:0044`、マウス・受信機 FW、受信機 LED およびアプリの基本設定の GET まで照合した。
 
 ### 5.1 デバイス識別 (env-models.json + 実機)
 
@@ -819,7 +821,8 @@ firmwareMark:"f1", upgradeTogether:true, BottomButton:false, DpiRgb:false, DpiTo
   `37B0` には 64B feature ヘルパーを選ぶ。16B `sendReport(8,…)` は別実装。
   `0048` の 8K ドングルも公式コードでは同じ 64B ヘルパーを選び、
   マウス FW には target `2`、受信機 FW には target `0` を使う。ペア済みマウスは
-  `GetDevicePID` の応答で識別する。`0048` は複数の LM20 モデルで共通、実機未検証。
+  `GetDevicePID` の応答で識別する。`0048` は複数の LM20 モデルで共通。
+  実機応答は `A1`、有効ペイロード `[02,01,37,B0,00,44]`（MAYA X V2 と確認）。
 - **全設定は 64B フィーチャーチャネル**: `send_feature_report(buf65=rid0+64B)`
   → `get_feature_report` で応答 (~10-30ms、120ms sleep + 1 read で安定)。
 - 送信フレーム (JS 準拠): `data[2]=2, data[3]=sub, data[4]=f, data[5]=cmd,
@@ -938,7 +941,7 @@ get/set は cmd が +0x80/同一値の関係。`devID` はプロファイル番�
 | 7+len | 4 | 131/3 | MacroData get/set `[u16BE slot,u32BE offset,u8 len,data…]` (get は末尾 data なし) | 公式コードのみ |
 | 2 | 4 | -/2 | DeleteMacro `[u16BE slot]` | 公式コードのみ |
 | 5+len | 3 | 128/0 * | ボタン get/set `[dev,btn,0,type,len,params]` | 全5個 type1 (既定マウスボタン) |
-| 6 | 0 | 139/- | GetDevicePID、target `1`、引数 `[2]` → `a[9..11]`=VID、`a[11..13]`=PID (u16BE) | ドングルでのペア済み機種識別。公式コードのみ |
+| 6 | 0 | 139/- | GetDevicePID、target `1`、引数 `[2]` → `a[9..11]`=VID、`a[11..13]`=PID (u16BE) | `0048` 経由で `37B0:0044` を読取確認 |
 | 16 | 0 | 129/- | GetUSBPID、target `1` → `a[11..13]`=PID (u16BE) | 公式コードのみ |
 | - | - | 176/- | enterBL `[0,t,1,0,176]` / exitNormal `…,4,1` | - |
 | 2 | 0 | -/0 | defaultDevice 工場リセット `[2,2,0,0,192,1]` * | 全プロファイル初期化・実機確認 |
@@ -1018,7 +1021,7 @@ get/set は cmd が +0x80/同一値の関係。`devID` はプロファイル番�
 - 確認度を分ける。ポーリング、LOD、MotionSync、アクティブ DPI、ボタン、プロファイルの
   切替は過去に値を変えて読み戻し済み。DPI 一覧と Adaptive DPI は同値書込みまで。
   DPI 色、ScrollHP、SensorOffset などは今回の読み取りで確認したが、書込みは再検証していない。
-  マクロの確保/転送/削除、独立した RGB、ペアリング、EID/PID 書込み、FW 更新、無線は未検証。
+  マクロの確保/転送/削除、独立した RGB、ペアリング、EID/PID 書込み、FW 更新、無線での設定書き込みはこの解析では未検証。
 - FW 更新は enterBL → erase → program (.hex、BL=37B0:0044) — 未実装でよい。
 
 ### 5.7 ドライバ実装サマリ (lamzu.rs 用)

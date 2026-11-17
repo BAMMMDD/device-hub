@@ -623,6 +623,7 @@ fn encode_gw(action: &ButtonAction) -> HubResult<(u8, Vec<u8>)> {
         PollingCycle => (13, vec![3]),
         ProfileCycle => (8, vec![3]),
         ScrollModeToggle => return Err(HubError::Unsupported("scroll-mode toggle (GW)")),
+        Unsupported { .. } => return Err(HubError::Unsupported("raw action")),
     })
 }
 
@@ -739,6 +740,7 @@ fn encode_jm(slot: usize, action: &ButtonAction) -> HubResult<(u8, Vec<u8>)> {
         PollingCycle => (7, vec![0]),
         ProfileCycle => (8, vec![3]),
         ScrollModeToggle => return Err(HubError::Unsupported("scroll-mode toggle (JM)")),
+        Unsupported { .. } => return Err(HubError::Unsupported("raw action")),
     })
 }
 

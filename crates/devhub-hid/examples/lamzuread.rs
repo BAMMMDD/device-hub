@@ -198,6 +198,9 @@ fn main() {
         "rapid_right",
         "rapid_left",
         "adaptive_dpi",
+        // ドングル経由のみ存在 (有線では自動スキップ)。
+        "dongle_led",
+        "glass_mode",
     ] {
         let Some(SettingValue::Bool(cur)) = s.settings.get(id) else {
             continue;
@@ -281,6 +284,32 @@ fn main() {
             value: SettingValue::Choice(cur),
         })
         .expect("restore");
+    }
+
+    // ドングル LED モード (無線のみ): led1 → 別モード → 復元。
+    for id in ["dongle_led1", "dongle_led2", "dongle_led3"] {
+        if let Some(SettingValue::Choice(cur)) = s.settings.get(id) {
+            let cur = *cur;
+            let t = if cur == 6 { 11 } else { 6 };
+            println!("== apply {id} {cur} -> {t}");
+            d.apply(&Change::Setting {
+                id: id.into(),
+                value: SettingValue::Choice(t),
+            })
+            .expect("apply");
+            let s2 = d.read().expect("read2");
+            let now = match s2.settings.get(id) {
+                Some(SettingValue::Choice(v)) => *v,
+                _ => -1,
+            };
+            println!("   readback: {now}");
+            assert_eq!(now, t);
+            d.apply(&Change::Setting {
+                id: id.into(),
+                value: SettingValue::Choice(cur),
+            })
+            .expect("restore");
+        }
     }
 
     // B-hop 方向: 0 (OFF) → 2 (上) → 復元。

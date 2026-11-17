@@ -1005,6 +1005,10 @@ impl Shell {
             ButtonAction::ScrollModeToggle => {
                 ui::sub("ホイールの上下ロール動作を切り替えます。").into_any_element()
             }
+            ButtonAction::Unsupported { .. } => {
+                ui::sub("このデバイスに記録されている割当は未対応の種類です。別の割当を選ぶと元には戻せません。")
+                    .into_any_element()
+            }
         };
         let _ = window;
         div()

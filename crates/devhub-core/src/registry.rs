@@ -188,7 +188,9 @@ pub const KNOWN: &[KnownDevice] = &[
         kind: DeviceKind::Mouse,
         vendor: "LAMZU",
         model: "lamzu-dongle",
-        name: "LAMZU Maya X V2",
+        // 初期値は受信機名 — ドライバが GetDevicePID でペア先を確定してから
+        // info.name/model を製品名 (例: LAMZU Maya X V2 / maya-x-v2) に確定する。
+        name: "LAMZU Orbital 8K Dongle",
         transport: Transport::Wireless24G,
         driver: DriverKind::Lamzu,
         verified: true,
