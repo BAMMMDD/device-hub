@@ -186,5 +186,151 @@ fn main() {
         })
         .expect("restore");
     }
+
+    // ---- 拡張往復 ----------------------------------------------------------
+    // トグル系をまとめて反転 → 読み戻し → 復元。
+    for id in [
+        "hyper_mode",
+        "tracking_mode",
+        "dpi_xy",
+        "angle_snap",
+        "ripple",
+        "rapid_right",
+        "rapid_left",
+        "adaptive_dpi",
+    ] {
+        let Some(SettingValue::Bool(cur)) = s.settings.get(id) else {
+            continue;
+        };
+        println!("== apply {id} {} -> {}", cur, !cur);
+        d.apply(&Change::Setting {
+            id: id.into(),
+            value: SettingValue::Bool(!cur),
+        })
+        .expect("apply");
+        let s2 = d.read().expect("read2");
+        let now = matches!(s2.settings.get(id), Some(SettingValue::Bool(true)));
+        println!("   readback: {now} (expect {})", !cur);
+        assert_eq!(now, !cur, "{id} roundtrip failed");
+        d.apply(&Change::Setting {
+            id: id.into(),
+            value: SettingValue::Bool(*cur),
+        })
+        .expect("restore");
+    }
+
+    // 数値系: sensor_offset ±1、angle_tune +5、B-hop ms +200。
+    for id in ["sensor_offset", "angle_tune", "bhop_ms"] {
+        if let Some(SettingValue::Num(cur)) = s.settings.get(id) {
+            let t = match id {
+                "sensor_offset" => {
+                    if *cur < 5.0 {
+                        *cur + 1.0
+                    } else {
+                        *cur - 1.0
+                    }
+                }
+                "angle_tune" => 5.0,
+                _ => {
+                    if *cur < 1000.0 {
+                        *cur + 200.0
+                    } else {
+                        *cur - 200.0
+                    }
+                }
+            };
+            println!("== apply {id} {cur} -> {t}");
+            d.apply(&Change::Setting {
+                id: id.into(),
+                value: SettingValue::Num(t),
+            })
+            .expect("apply");
+            let s2 = d.read().expect("read2");
+            let now = match s2.settings.get(id) {
+                Some(SettingValue::Num(v)) => *v,
+                _ => f32::NAN,
+            };
+            println!("   readback: {now}");
+            assert_eq!(now, t, "{id} roundtrip failed");
+            d.apply(&Change::Setting {
+                id: id.into(),
+                value: SettingValue::Num(*cur),
+            })
+            .expect("restore");
+        }
+    }
+
+    // スリープ: 5分 → 読み戻し → 復元。
+    if let Some(SettingValue::Choice(cur)) = s.settings.get("sleep_min") {
+        let cur = *cur;
+        println!("== apply sleep_min {cur} -> 5");
+        d.apply(&Change::Setting {
+            id: "sleep_min".into(),
+            value: SettingValue::Choice(5),
+        })
+        .expect("apply");
+        let s2 = d.read().expect("read2");
+        let now = match s2.settings.get("sleep_min") {
+            Some(SettingValue::Choice(v)) => *v,
+            _ => -1,
+        };
+        println!("   readback: {now}");
+        assert_eq!(now, 5);
+        d.apply(&Change::Setting {
+            id: "sleep_min".into(),
+            value: SettingValue::Choice(cur),
+        })
+        .expect("restore");
+    }
+
+    // B-hop 方向: 0 (OFF) → 2 (上) → 復元。
+    if let Some(SettingValue::Choice(cur)) = s.settings.get("bhop_dir") {
+        let cur = *cur;
+        let t = if cur == 0 { 2 } else { 0 };
+        println!("== apply bhop_dir {cur} -> {t}");
+        d.apply(&Change::Setting {
+            id: "bhop_dir".into(),
+            value: SettingValue::Choice(t),
+        })
+        .expect("apply");
+        let s2 = d.read().expect("read2");
+        let now = match s2.settings.get("bhop_dir") {
+            Some(SettingValue::Choice(v)) => *v,
+            _ => -1,
+        };
+        println!("   readback: {now}");
+        assert_eq!(now, t);
+        d.apply(&Change::Setting {
+            id: "bhop_dir".into(),
+            value: SettingValue::Choice(cur),
+        })
+        .expect("restore");
+    }
+
+    // DPI ステージ一括: 同じリストを書き戻す (sub26 経路の E2E)。
+    if !ms.stages.is_empty() {
+        println!("== apply dpi stages (same {} stages)", ms.stages.len());
+        d.apply(&Change::DpiStages {
+            stages: ms.stages.clone(),
+            active: ms.active_stage,
+        })
+        .expect("apply");
+        let s2 = d.read().expect("read2");
+        let st2 = &s2.mouse.as_ref().unwrap().stages;
+        println!("   readback: {} stages, first={}", st2.len(), st2[0].x);
+        assert_eq!(st2.len(), ms.stages.len());
+        assert_eq!(st2[0].x, ms.stages[0].x);
+    }
+
+    // プロファイル切替: p1→p2→p1 (最後に実行 — 読み出す設定が変わるので)。
+    println!("== apply profile 0 -> 1");
+    d.apply(&Change::Profile(1)).expect("apply");
+    let s2 = d.read().expect("read2");
+    println!("   readback: active={}", s2.profile.active);
+    assert_eq!(s2.profile.active, 1);
+    d.apply(&Change::Profile(0)).expect("restore");
+    let s3 = d.read().expect("read3");
+    assert_eq!(s3.profile.active, 0);
+    println!("   restored to profile 0");
     println!("OK");
 }

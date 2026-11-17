@@ -188,7 +188,7 @@ pub const KNOWN: &[KnownDevice] = &[
         kind: DeviceKind::Mouse,
         vendor: "LAMZU",
         model: "lamzu-dongle",
-        name: "LAMZU ワイヤレスドングル",
+        name: "LAMZU Maya X V2",
         transport: Transport::Wireless24G,
         driver: DriverKind::Lamzu,
         verified: true,

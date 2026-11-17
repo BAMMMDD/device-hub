@@ -50,7 +50,12 @@ fn cmd(
     let mut last = HubError::Protocol("lamzu: response timeout".into());
     // ドングル経由の一部書込み (ポーリング変更等) は RF 再ネゴシエーションで
     // 応答生成まで数秒かかることがある — get は余裕を持って繰り返す。
-    for _ in 0..25 {
+    // 送信自体が取りこぼされると応答が再生成されず stale バッファのまま
+    // 固まるので、公式 retrySetGet と同じく途中で 1 度だけ再送する。
+    for i in 0..25 {
+        if i == 12 {
+            dev.send_feature_report(&w).ok();
+        }
         sleep(CMD_DELAY);
         let mut r = [0u8; 65];
         match dev.get_feature_report(&mut r) {
@@ -425,6 +430,16 @@ fn build_caps(transport: Transport) -> Capabilities {
                 SettingSpec::choice(id, LIGHTING, name, modes()).help("各 LED が表示する情報"),
             );
         }
+        // 有線 FW (37b0:0044, 0.0.3.0) では dpi indicator get が a3 拒否・
+        // glass set が ACK されるが適用されない — ドングル経由のみ公開。
+        dongle_led.push(
+            SettingSpec::toggle("dpi_led", LIGHTING, "DPI インジケーター LED")
+                .help("DPI ステージ色を本体 LED に表示"),
+        );
+        dongle_led.push(
+            SettingSpec::toggle("glass_mode", SENSOR, "ガラスモード")
+                .help("ガラス面での追従を改善します"),
+        );
     }
     Capabilities {
         settings: vec![
@@ -487,10 +502,6 @@ fn build_caps(transport: Transport) -> Capabilities {
                 "mm",
             )
             .help("センサー位置の前後オフセット"),
-            SettingSpec::toggle("dpi_led", LIGHTING, "DPI インジケーター LED")
-                .help("DPI ステージ色を本体 LED に表示"),
-            SettingSpec::toggle("glass_mode", SENSOR, "ガラスモード")
-                .help("ガラス面での追従を改善します"),
             SettingSpec::slider("debounce", CLICK, "クリックデバウンス", 0., 32., 1., "ms")
                 .help("ボタンのチャタリング防止"),
             SettingSpec::choice(
@@ -667,12 +678,13 @@ impl DeviceDriver for LamzuDriver {
             let signed = if v > 100 { v as i64 - 256 } else { v as i64 };
             settings.insert("sensor_offset".into(), SettingValue::Num(signed as f32));
         }
-        // DPI インジケーター LED。
-        if let Ok(v) = self.get(2, 2, 132, dev) {
-            settings.insert("dpi_led".into(), SettingValue::Bool(v == 1));
-        }
-        // ドングル LED (受信機側 LightEffect dev=1) — ドングル経由のみ。
+        // ドングル経由のみ有効な項目 (有線 FW では a3/無視): DPI インジケーター、
+        // 受信機 3 灯、ガラスモード。
         if self.is_dongle() {
+            // DPI インジケーター LED。
+            if let Ok(v) = self.get(2, 2, 132, dev) {
+                settings.insert("dpi_led".into(), SettingValue::Bool(v == 1));
+            }
             // マスタースイッチ: light_idx=255 のモード (5=on, 0=off)。
             if let Ok(r) = self.run(1, 5, 2, 128, &[dev, 255]) {
                 settings.insert(
@@ -724,12 +736,14 @@ impl DeviceDriver for LamzuDriver {
                 SettingValue::Bool(u8_at(&r, 8).unwrap_or(0) == 1),
             );
         }
-        // GlassMode (devID 無し)。
-        if let Ok(r) = self.run(2, 1, 1, 142, &[0]) {
-            settings.insert(
-                "glass_mode".into(),
-                SettingValue::Bool(u8_at(&r, 7).unwrap_or(0) == 1),
-            );
+        // GlassMode (devID 無し) — 有線 FW は set を無視するのでドングルのみ。
+        if self.is_dongle() {
+            if let Ok(r) = self.run(2, 1, 1, 142, &[0]) {
+                settings.insert(
+                    "glass_mode".into(),
+                    SettingValue::Bool(u8_at(&r, 7).unwrap_or(0) == 1),
+                );
+            }
         }
 
         // DPI ステージ: get [dev,6] → a[8]=数, a[9..]=4B×N (X,Y u16BE)。
@@ -868,7 +882,7 @@ impl DeviceDriver for LamzuDriver {
                     self.run(1, 5, 2, 0, &[prof, idx, mode, 0, 0]).map(|_| ())
                 }
                 "glass_mode" => self
-                    .run(2, 1, 1, 14, &[0, value.as_bool() as u8])
+                    .run(2, 1, 1, 14, &[value.as_bool() as u8])
                     .map(|_| ()),
                 "debounce" => self.set(2, 0, 8, prof, value.as_num().clamp(0., 255.) as u8),
                 "sleep_min" => {
