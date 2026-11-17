@@ -20,3 +20,4 @@ obs-gallery*.png
 
 # ローカル実行用の設定 (実機/個人設定は配布物に入れない)
 prefs.json
+dist/
