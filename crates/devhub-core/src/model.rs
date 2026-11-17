@@ -245,6 +245,9 @@ pub struct SettingSpec {
     pub visible_when: Option<(String, SettingValue)>,
     /// 変更前に確認ダイアログを出す文言 (危険な設定)。
     pub confirm: Option<String>,
+    /// 他の設定がこの値のときだけ操作できる (それ以外は無効表示)。
+    /// `(設定 id, 値, 無効時の説明)`。例: 20K FPS は競技モード ON のときだけ。
+    pub enabled_when: Option<(String, SettingValue, String)>,
 }
 
 impl SettingSpec {
@@ -257,6 +260,7 @@ impl SettingSpec {
             kind: SettingKind::Toggle,
             visible_when: None,
             confirm: None,
+            enabled_when: None,
         }
     }
     pub fn slider(
@@ -294,6 +298,11 @@ impl SettingSpec {
     }
     pub fn confirm(mut self, msg: &str) -> Self {
         self.confirm = Some(msg.into());
+        self
+    }
+    /// `id` の設定が `v` のときだけ操作可能 (それ以外は `note` を添えて無効表示)。
+    pub fn enabled_when(mut self, id: &str, v: SettingValue, note: &str) -> Self {
+        self.enabled_when = Some((id.into(), v, note.into()));
         self
     }
 }
@@ -629,6 +638,8 @@ pub struct MouseCaps {
     /// 押下深さを返せるボタンの slot 番号 (`buttons` の index)。空なら UI は出さない。
     /// `DeviceDriver::live_buttons` の返り値はこの並び。
     pub live_buttons: Vec<usize>,
+    /// 速度連動 DPI (AdaDPI / Adaptive DPI) のカーブ。`MouseState::adaptive` と `Change::Adaptive` が対。
+    pub adaptive_dpi: Option<AdaptiveCaps>,
 }
 
 /// 押下深さを返せるボタン 1 個分 (磁気スイッチなど)。`DeviceDriver::live_buttons`。
@@ -650,6 +661,37 @@ pub struct MouseState {
     pub buttons: Vec<ButtonAction>,
     /// スロット順。空スロットは None。
     pub macros: Vec<Option<MacroDef>>,
+    /// 速度連動 DPI のカーブ (`MouseCaps::adaptive_dpi` があるときだけ Some)。
+    #[serde(default)]
+    pub adaptive: Option<AdaptiveCurve>,
+}
+
+/// 速度連動 DPI カーブの 1 点: マウス速度 → DPI 倍率。
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AdaptivePoint {
+    /// 速度 (デバイス単位。LAMZU は 0–105 の目盛り)。
+    pub speed: u16,
+    /// DPI 倍率 (1.0 = 等倍)。
+    pub ratio: f32,
+}
+
+/// 速度連動 DPI の状態。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AdaptiveCurve {
+    pub enabled: bool,
+    /// 速度の昇順。
+    pub points: Vec<AdaptivePoint>,
+}
+
+/// 速度連動 DPI の機能宣言。
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdaptiveCaps {
+    pub min_points: usize,
+    pub max_points: usize,
+    pub speed_max: u16,
+    pub ratio_max: f32,
+    /// 公式プリセット (名前, 点列)。
+    pub presets: Vec<(String, Vec<AdaptivePoint>)>,
 }
 
 // ====================================================================== キーボード
@@ -1222,6 +1264,10 @@ pub enum Change {
     PeqAll {
         bands: Vec<PeqBand>,
     },
+
+    // ---- マウス (速度連動 DPI)
+    /// 速度連動 DPI の有効/無効とカーブ。
+    Adaptive(AdaptiveCurve),
 }
 
 impl Change {
@@ -1256,6 +1302,7 @@ impl Change {
             (Peq { band: a, .. }, Peq { band: b, .. }) => a == b,
             (PeqAll { .. }, PeqAll { .. }) => true,
             (Peq { .. }, PeqAll { .. }) | (PeqAll { .. }, Peq { .. }) => true,
+            (Adaptive(_), Adaptive(_)) => true,
             _ => false,
         }
     }

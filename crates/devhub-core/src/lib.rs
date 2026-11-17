@@ -9,6 +9,7 @@
 pub mod backend;
 pub mod demo;
 pub mod keys;
+pub mod lamzu;
 pub mod model;
 pub mod peq;
 pub mod registry;

@@ -42,6 +42,7 @@ impl DemoHub {
                 false,
             )),
             Arc::new(DemoDriver::dac()),
+            Arc::new(DemoDriver::lamzu()),
         ];
         drivers.shrink_to_fit();
         Self {
@@ -198,6 +199,41 @@ impl DemoDriver {
     }
 
     /// peq.szwalkplay.com (WalkPlay TP55) 相当の USB DAC。
+    /// LAMZU MAYA X V2 (8K レシーバー経由) — 公式 Aurora と同じ caps (`crate::lamzu`)。
+    fn lamzu() -> Self {
+        let model = &crate::lamzu::MODELS[0];
+        let caps = crate::lamzu::caps(model, Transport::Wireless24G, 4);
+        let state = lamzu_state(&caps);
+        Self {
+            info: DeviceInfo {
+                id: DeviceId("demo:maya-x-v2".into()),
+                kind: DeviceKind::Mouse,
+                name: model.name.into(),
+                vendor: "LAMZU".into(),
+                model: model.model.into(),
+                vid: 0x37B0,
+                pid: 0x0048,
+                transport: Transport::Wireless24G,
+                firmware: Some("0.0.3.0".into()),
+                dongle_firmware: Some("0.0.3.0".into()),
+                serial: None,
+                driver: DriverKind::Lamzu,
+                battery: Some(Battery {
+                    percent: Some(100),
+                    charging: false,
+                }),
+                supported: true,
+                asleep: false,
+                board_id: None,
+            },
+            state: Mutex::new(state.clone()),
+            saved: Mutex::new(Default::default()),
+            factory: state,
+            caps,
+            born: Instant::now(),
+        }
+    }
+
     fn dac() -> Self {
         let caps = dac_caps();
         Self {
@@ -371,6 +407,11 @@ impl DeviceDriver for DemoDriver {
             Change::PeqAll { bands } => {
                 if s.peq.is_some() {
                     s.peq = Some(bands);
+                }
+            }
+            Change::Adaptive(curve) => {
+                if let Some(m) = s.mouse.as_mut().filter(|m| m.adaptive.is_some()) {
+                    m.adaptive = Some(curve);
                 }
             }
         }
@@ -785,6 +826,7 @@ pub fn mouse_caps(wireless: bool, magnetic: bool) -> Capabilities {
             require_left_click: true,
             macros: Some(macro_caps_mouse()),
             live_buttons: if magnetic { vec![0, 1] } else { vec![] },
+            adaptive_dpi: None,
         }),
         keyboard: None,
         lighting: vec![],
@@ -874,6 +916,7 @@ fn mouse_state(caps: &Capabilities) -> DeviceState {
                 }
                 v
             },
+            adaptive: None,
         }),
         keyboard: None,
         lighting: BTreeMap::new(),
@@ -1471,5 +1514,72 @@ fn dac_state(caps: &Capabilities) -> DeviceState {
                 })
                 .collect(),
         ),
+    }
+}
+
+// ====================================================================== LAMZU (公式 Aurora 相当)
+
+fn lamzu_state(caps: &Capabilities) -> DeviceState {
+    let mut settings = BTreeMap::new();
+    for (id, v) in [
+        ("polling_wireless", SettingValue::Choice(8000)),
+        ("hyper_mode", SettingValue::Bool(true)),
+        ("tracking_mode", SettingValue::Bool(true)),
+        ("lod", SettingValue::Choice(7)),
+        ("glass_mode", SettingValue::Bool(false)),
+        ("motion_sync", SettingValue::Bool(false)),
+        ("angle_snap", SettingValue::Bool(false)),
+        ("ripple", SettingValue::Bool(false)),
+        ("dpi_xy", SettingValue::Bool(false)),
+        ("angle_tune", SettingValue::Num(1.)),
+        ("sensor_offset", SettingValue::Num(0.)),
+        ("debounce", SettingValue::Num(0.)),
+        ("rapid_left", SettingValue::Bool(true)),
+        ("rapid_right", SettingValue::Bool(false)),
+        ("bhop_dir", SettingValue::Choice(0)),
+        ("bhop_ms", SettingValue::Choice(200)),
+        ("sleep_min", SettingValue::Choice(1)),
+        ("dongle_led", SettingValue::Bool(true)),
+        ("dongle_led1", SettingValue::Choice(10)),
+        ("dongle_led2", SettingValue::Choice(11)),
+        ("dongle_led3", SettingValue::Choice(6)),
+    ] {
+        if caps.setting(id).is_some() {
+            settings.insert(id.to_string(), v);
+        }
+    }
+    let colors = [0xD00067u32, 0x00A5D1, 0x0F9B00, 0xFFFFFF, 0xCAC700];
+    let stages = [400u32, 800, 1600, 3200, 6400]
+        .iter()
+        .zip(colors)
+        .map(|(&x, c)| DpiStage {
+            x,
+            y: None,
+            color: Rgb::hex(c),
+            enabled: true,
+        })
+        .collect();
+    DeviceState {
+        profile: ProfileState::default(),
+        settings,
+        mouse: Some(MouseState {
+            stages,
+            active_stage: 2,
+            buttons: vec![
+                ButtonAction::Mouse(MouseFn::Left),
+                ButtonAction::Mouse(MouseFn::Right),
+                ButtonAction::Mouse(MouseFn::Middle),
+                ButtonAction::Mouse(MouseFn::Back),
+                ButtonAction::Mouse(MouseFn::Forward),
+            ],
+            macros: vec![],
+            adaptive: Some(AdaptiveCurve {
+                enabled: false,
+                points: crate::lamzu::adaptive_presets()[0].1.clone(),
+            }),
+        }),
+        keyboard: None,
+        lighting: BTreeMap::new(),
+        peq: None,
     }
 }

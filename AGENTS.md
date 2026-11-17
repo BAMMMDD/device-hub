@@ -11,6 +11,7 @@ crates/devhub-hid    実機ドライバ (HID)                                   
 crates/device-hub    GPUI フロントエンド (Liquid Glass)                                         ← フロント担当
 vendor/              GPU backdrop を足した gpui-pre / gpui-pre-windows (GPU backdrop パッチ)
 docs/NEXT_TASKS.md      次にやること (v4)
+docs/LAMZU_MAYA_X_V2_AUDIT2.md  LAMZU MAYA X V2 再監査 (要修正 P1/P2・名前の対応表・作業順)
 docs/POLLING_RATE.md    ポーリング実測の検証と改善案 (2700Hz 問題)
 docs/OBS_OVERLAY.md     OBS オーバーレイ (デザイン・アプリ側エディタ・設定ファイル連携)
 docs/LIVE_LIGHTING.md   ライブライティング (DirectDrive) とキーボード UI 改善 + バックエンド依頼

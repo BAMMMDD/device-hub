@@ -2047,6 +2047,7 @@ fn build_caps(xs: &XsydInfo) -> Capabilities {
             },
             visible_when: None,
             confirm: None,
+            enabled_when: None,
         },
         SettingSpec {
             id: "system_type".into(),
@@ -2058,6 +2059,7 @@ fn build_caps(xs: &XsydInfo) -> Capabilities {
             },
             visible_when: None,
             confirm: None,
+            enabled_when: None,
         },
         SettingSpec::toggle("shake_opt", KEYBOARD, "チャタリング防止"),
         SettingSpec::slider(

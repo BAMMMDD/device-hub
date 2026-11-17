@@ -391,7 +391,7 @@ impl Shell {
         ui::card().child(c)
     }
 
-    pub fn page_performance(
+    pub fn page_performance_legacy(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,

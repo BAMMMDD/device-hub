@@ -197,7 +197,6 @@ fn main() {
         "ripple",
         "rapid_right",
         "rapid_left",
-        "adaptive_dpi",
         // ドングル経由のみ存在 (有線では自動スキップ)。
         "dongle_led",
         "glass_mode",
@@ -310,6 +309,21 @@ fn main() {
             })
             .expect("restore");
         }
+    }
+
+    // AdaDPI カーブ: 末尾の点を少し変えて書き → 読み戻し → 元に復元。
+    if let Some(cur) = s.mouse.as_ref().and_then(|m| m.adaptive.clone()) {
+        let mut tmp = cur.clone();
+        if let Some(p) = tmp.points.last_mut() {
+            p.speed = if p.speed == 40 { 41 } else { 40 };
+        }
+        println!("== apply adaptive curve ({} points)", tmp.points.len());
+        d.apply(&Change::Adaptive(tmp)).expect("adaptive apply");
+        let s2 = d.read().expect("read2");
+        let back = s2.mouse.as_ref().and_then(|m| m.adaptive.clone());
+        println!("   readback: {:?}", back.as_ref().map(|c| c.points.len()));
+        assert!(back.is_some());
+        d.apply(&Change::Adaptive(cur)).expect("adaptive restore");
     }
 
     // B-hop 方向: 0 (OFF) → 2 (上) → 復元。

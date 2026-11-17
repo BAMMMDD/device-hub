@@ -1377,6 +1377,7 @@ fn build_caps(info: &DeviceInfo, m: &R8Model) -> Capabilities {
             ],
             require_left_click: true,
             live_buttons: if m.magnetic { vec![0, 1] } else { vec![] },
+            adaptive_dpi: None,
             macros: Some(MacroCaps {
                 slots: 3,
                 max_events: 70,
@@ -1469,6 +1470,7 @@ impl DeviceDriver for MfDongleDriver {
                         active_stage: 0,
                         buttons: vec![],
                         macros: vec![],
+                        adaptive: None,
                     }),
                     keyboard: None,
                     lighting: BTreeMap::new(),
@@ -1705,6 +1707,7 @@ impl DeviceDriver for MfDongleDriver {
                 active_stage,
                 buttons,
                 macros,
+                adaptive: None,
             }),
             keyboard: None,
             lighting: BTreeMap::new(),

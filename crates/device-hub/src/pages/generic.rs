@@ -81,7 +81,15 @@ impl Shell {
             let (title, icon) = section_meta(&sec);
             let mut body = ui::body();
             for (i, sp) in specs.iter().enumerate() {
-                let r = self.setting_row(sp, state.settings.get(&sp.id), i == 0, window, cx);
+                let mut r = self.setting_row(sp, state.settings.get(&sp.id), i == 0, window, cx);
+                // enabled_when を満たさない設定は薄く (理由はツールチップ代わりに下へ)。
+                if let Err(why) = crate::pages::perf::enabled(sp, &state) {
+                    r = div()
+                        .flex()
+                        .flex_col()
+                        .child(r.opacity(0.4))
+                        .child(ui::faint(why).pb(px(6.)));
+                }
                 body = body.child(r);
             }
             for (i, a) in actions.iter().enumerate() {

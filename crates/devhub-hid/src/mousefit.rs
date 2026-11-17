@@ -1137,6 +1137,7 @@ fn build_caps(info: &DeviceInfo, m: &MfModel) -> Capabilities {
             ],
             require_left_click: true,
             live_buttons: vec![],
+            adaptive_dpi: None,
             macros: Some(MacroCaps {
                 slots: 3,
                 max_events: 70,
@@ -1359,6 +1360,7 @@ impl DeviceDriver for MousefitDriver {
                 active_stage: active,
                 buttons,
                 macros,
+                adaptive: None,
             }),
             keyboard: None,
             lighting: BTreeMap::new(),

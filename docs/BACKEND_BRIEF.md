@@ -151,6 +151,11 @@ mouse.fit の機種表に無い。実機の VID/PID/usage を取り、`docs/ADD_
 ## 6. 契約 (devhub-core) を広げるとき
 
 - スカラー設定 → `SettingSpec` を足すだけ (契約変更なし、UI に自動で出る)。
+  - 他の設定に従属するもの (例: LAMZU の 20K FPS は競技モード ON のときだけ) は
+    `.enabled_when("hyper_mode", SettingValue::Bool(true), "先に競技モードを有効にしてください")`。
+    UI は条件を満たさない間、行を薄くして理由を出し、操作させない。ドライバ側でも必ず拒否 (`Err(Invalid)`) すること。
+  - 速度連動 DPI のカーブは `MouseCaps::adaptive_dpi: Option<AdaptiveCaps>` + `MouseState::adaptive` + `Change::Adaptive`
+    (点 = 速度 u16 と倍率 f32)。宣言すれば性能タブにカーブ編集カードが出る。
 - ボタン 1 つの操作 → `ActionSpec` を足すだけ。
 - 構造を持つ新機能 (画面 GIF、音声、ハンドルモード、レシーバーのボタン割り当て等) → `model.rs` に型と `Change`
   の variant を**追加** (既存は変えない)。`demo.rs` にも実装し、**`docs/FRONTEND_TODO.md` に UI の要望を書く**

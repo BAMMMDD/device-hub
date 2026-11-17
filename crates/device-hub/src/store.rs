@@ -1349,6 +1349,11 @@ pub fn apply_local(s: &mut DeviceState, change: &Change) {
                 s.peq = Some(bands);
             }
         }
+        Change::Adaptive(curve) => {
+            if let Some(m) = s.mouse.as_mut().filter(|m| m.adaptive.is_some()) {
+                m.adaptive = Some(curve);
+            }
+        }
     }
 }
 
@@ -1466,6 +1471,15 @@ pub fn diff_changes(caps: &Capabilities, cur: &DeviceState, target: &DeviceState
             out.push(Change::PeqAll { bands: t.clone() });
         }
     }
+    if let (Some(t), Some(c), Some(_)) = (
+        target.mouse.as_ref().and_then(|m| m.adaptive.as_ref()),
+        cur.mouse.as_ref().and_then(|m| m.adaptive.as_ref()),
+        caps.mouse.as_ref().and_then(|m| m.adaptive_dpi.as_ref()),
+    ) {
+        if t != c {
+            out.push(Change::Adaptive(t.clone()));
+        }
+    }
     // 構成の切替自体はここでは出さない — `Job::Profile` で切替+再読をひとまとめにする。
     // (切替前の差分を切替後の構成へ書かないため)。名前だけは通常の書き込みで戻せる。
     if caps.profiles.as_ref().is_some_and(|pc| pc.renamable) {
@@ -1527,6 +1541,12 @@ pub fn snapshot_changes(caps: &Capabilities, st: &DeviceState) -> Vec<Change> {
         if t.len() == pc.bands as usize {
             out.push(Change::PeqAll { bands: t.clone() });
         }
+    }
+    if let (Some(t), Some(_)) = (
+        st.mouse.as_ref().and_then(|m| m.adaptive.as_ref()),
+        caps.mouse.as_ref().and_then(|m| m.adaptive_dpi.as_ref()),
+    ) {
+        out.push(Change::Adaptive(t.clone()));
     }
     out
 }

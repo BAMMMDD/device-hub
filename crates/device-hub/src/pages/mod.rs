@@ -13,6 +13,7 @@ pub mod live;
 pub mod macros;
 pub mod mouse;
 pub mod obs;
+pub mod perf;
 pub mod settings;
 pub mod system;
 pub mod test;
