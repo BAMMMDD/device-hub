@@ -1006,7 +1006,9 @@ SetLightness `[0,dev,3,2,2,r,n,o]` / GetLightness `[0,dev,3,2,130,r,n]`。
   上記破壊の最有力原因)、ライト effect/輝度の set (get は実機確認済:
   effect=0 は a2 空応答、1/2/4/5 は a1+effect echo、lightness r1=0xa9)、
   AdaptiveDPI 書込み (get は実機確認済: a[4]=0x22 で曲線ペアデータ有り)、
-  EID/PID 書込み、プロファイル切替後の挙動。
-  スリープ・デバウンス・Tracking・DPI-XY・SpeedEnable・MotionSync・
-  SensorOffset・ScrollHP・GlassMode・ボタン get/set は実機往復確認済み。
+  EID/PID 書込み。
+  プロファイル切替 `[2,1,0,5,prof]` も往復確認 (get は `a[7]`=現行、
+  切替後の設定保持も確認)。スリープ・デバウンス・Tracking・DPI-XY・
+  SpeedEnable・MotionSync・SensorOffset・ScrollHP・GlassMode・
+  ボタン get/set は実機往復確認済み。
 - FW 更新は enterBL → erase → program (.hex、BL=37B0:0044) — 未実装でよい。
