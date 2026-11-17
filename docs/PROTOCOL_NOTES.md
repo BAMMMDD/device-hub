@@ -781,41 +781,52 @@ firmwareMark:"f1", upgradeTogether:true, BottomButton:false, DpiRgb:false, DpiTo
 - `is54H20` フラグを持つ機種あり (別 MCU バリアント?)。
 - プローブ: `cargo run -p devhub-hid --example atkprobe` (読み取りのみ)。
 
-## 5. LAMZU Aurora (www.lamzu.net) — MayaX V2 等
+## 5. LAMZU Aurora (www.lamzu.net) — Maya X V2 (LM20) 実機検証済み
 
 解析: `analysis/lamzu-index-*.js` (バンドル), `analysis/lamzu-env-models.json`
-(デバイス定義テーブル、27機種)。未実機検証 — JS 解析のみ。
+(デバイス定義テーブル、27機種) + **実機プローブ** (`lamzuprobe` example、
+有線 37b0:0044 で読み書き往復検証済み)。
 
-### 5.1 デバイス識別 (env-models.json)
+### 5.1 デバイス識別 (env-models.json + 実機)
 
-`./Config/env-models.json` が機種定義。MayaX V2 (UIFolder=`MayaXV2`):
+`./Config/env-models.json` が機種定義。**実機は行 "Maya X(LM20)"**
+(製品文字列 `LAMZU Maya X V2`、FW ファイル名 `…Maya_X_V2_8K_Mouse_54LM20…` —
+表中の "MayaX V2" PID `001F` 行は別リビジョン):
 
-- VID `37B0` / PID wired `001F`。8K ドングル: VID `373E` / PID `0016`。
-  `PIDWireless: 00ff` は `_1KDongle` 空のため別経路 (BLE?)。
-- `IsNewProtocol: "1"`, `IsSensorModelCmd: "1"`, `CoreVersion`, `DPIMax: 30000`,
-  `LOD: "0.7;1;2"`, `DPIMaxStageNum: 5`, `KeyBindingSeq: "01..05"` (5ボタン),
-  `LightEffects: "1,2,4,5"`, `LightDeviceID: "1"`。
-- プロファイル 4 個 (UI 固定 1..4)。
-- `DeviceInitFilterVID: "373E;37B0;"` — 初期スキャン対象 VID。
-- 他機種行も同形式 (Maya/Maya X/Orcus/Atlantis/Thorn 等、VID 37B0/373E 系)。
+- VID `37B0` / PID wired **`0044`** (実機確認)。8K ドングル: `37B0:0048`。
+- `IsNewProtocol: "1"`, `IsSensorModelCmd: "1"`, **DPIMax: 50000**,
+  `PollingRateWired: 500;1000;2000;4000;8000`, `LOD: "0.7;1;2"`,
+  `DPIMaxStageNum: 5`, 5ボタン, `LightEffects: "1,2,4,5"`,
+  `SleepTimeGrade: 1min;5min;10min;15min;20min;25min` (10s系ではない)。
+- センサー型番コマンド応答 `4` → **PAW3955** (JS: 1=3395, 2=3950, 4=3955。
+  3955 時 LOD 候補 `0.7;1;1.3;1.5;1.7` に拡張、DPIMax 50000)。
+- プロファイル 4 個 (UI 固定 1..4)、devID = **プロファイル番号 (1-based)**。
+  `devID=0` を送ると応答タグが a2/a3 になり値がゼロ — devID は必須。
+- 他機種行も同形式 (Maya/Maya X/MayaX V2(001F)/Orcus/Atlantis/Thorn 等)。
 
-### 5.2 トランスポート — 2 チャネル併用
+### 5.2 トランスポート — 実機では 64B フィーチャーのみ
 
-新プロトコル機種 (MAYA X V2) は**両方のチャネルを併用**:
+実機 37b0:0044 のインターフェース構成:
 
-1. **16B チャネル** — output report ID 8 (`sendReport(8, buf16)`)、入力は
-   `oninputreport` で 16B。送信時 `buf[15] = get_Crc(buf) - 8`
-   (`get_Crc = 85 - Σbuf[0..14] & 0xFF`)。応答待ちは
-   `retrySetGetWithDelayCompx`: 送信→50ms sleep→`receivedData[0]==cmd`
-   になるまで待つ (WebHUB も「最初の一致フレーム」を応答とみなす)。
-2. **64B フィーチャーチャネル** — `sendFeatureReport(0, buf64)` /
-   `receiveFeatureReport(0)`。センサー系コマンド・ドングル EID・ライト・
-   工場リセットはこちら。フレーム `buf[2]=2, buf[3]=sub, buf[4]=f, buf[5]=cmd,
-   buf[6]=devID, buf[7..]=args` (応答は `a[1-hidIndex]==161` で正常、
-   値は `a[8-hidIndex]` 等 — `hidIndex`∈{0,1} は応答先頭の
-   レポートID有無で実行時にプローブ確定)。
+- if0 `0001:02` マウス / if1 `000C:01`・`0001:80`・`0001:06`・`FFA0:01`・`FFFF:01`
+  / **if2 `FFFF:00`** ← 設定チャネルはこれ。
+- **全コレクションで output report 不存在** (rid 0-16 × size 2-70 の
+  `write` が全て失敗) → JS の 16B `sendReport(8,…)` 経路はこの有線モデルでは
+  使えない。おそらく 8K ドングル側専用 (未検証)。
+- **全設定は 64B フィーチャーチャネル**: `send_feature_report(buf65=rid0+64B)`
+  → `get_feature_report` で応答 (~10-30ms、120ms sleep + 1 read で安定)。
+- 送信フレーム (JS 準拠): `data[2]=2, data[3]=sub, data[4]=f, data[5]=cmd,
+  data[6]=devID, data[7..]=args` (ライト系のみ `data[2]=devID`)。
+- 応答フレーム (実測 hidIndex=0): `a[1]=0xA1`=正常 ack (0xA2/0xA3 = 別 ack 種別、
+  devID=0 や無効引数で返る), `a[4..5]`=f,sub エコー, **`a[6]`=cmd エコー**,
+  **`a[7]`=devID エコー, `a[8]`=値**。
+- **書き込みは即時適用・別途 save コマンド不要** (set 直後の get で新値を確認、
+  polling 2↔128, LOD 1↔0x87, MotionSync 0↔1, activeDPI 1↔3,
+  DPI ステージ同値書込み — 全て往復確認)。
 
-### 5.3 16B チャネル コマンド
+### 5.3 16B チャネル コマンド (ドングル/旧リビジョン用 — 0044 有線では未検証・output report 不存在)
+
+JS 解析のみ (実機では使えず):
 
 | cmd | 方向 | 形式 |
 |---|---|---|
@@ -838,7 +849,7 @@ firmwareMark:"f1", upgradeTogether:true, BottomButton:false, DpiRgb:false, DpiTo
 - type6 = 接続/切断 `b[2]=1/0`, type7 = LOD `b[2]=生値`
 - type8 = ポーリング `b[2]=生値`, type13 = モード `b[2]=HighSpeed, b[3]=tracking`
 
-### 5.4 EEPROM マップ (Dt)
+### 5.4 EEPROM マップ (Dt — 16B 経路用、0044 有線では非適用)
 
 | addr | 内容 | addr | 内容 |
 |---|---|---|---|
@@ -875,42 +886,100 @@ firmwareMark:"f1", upgradeTogether:true, BottomButton:false, DpiRgb:false, DpiTo
   `+32` から 5B/イベント `[flag<<6|type, val_lo, val_hi, delay_hi, delay_lo]`。
   flag 同上 (press=2<<6=0x80, release=1<<6=0x40)。
 
-### 5.5 64B チャネル (センサー系, `IsSensorModelCmd`)
+### 5.5 64B チャネル コマンド表 (実機検証済み — `*` = 往復確認)
 
-`[0,0,2,sub,f,cmd,devID,args...]` 形式 (devID=profile index):
+送信 `[data2=2, sub, f, cmd, devID, args]` → 応答値は `a[8]` (bool は `==1`)。
+get/set は cmd が +0x80/同一値の関係。`devID` はプロファイル番号 (1-4)。
 
-| sub | cmd | 機能 |
-|---|---|---|
-| 1 | 14/142 | GlassMode set/get |
-| 1 | 130 | EID (ドングル) → b[6]==130?b[7]:(b[5]==130?b[6]:0) |
-| 1 | 13 | resetProfile `[2,1,0,13]` |
-| 2 | 128/… | polling get / DPI indicator(132 get,4 set) / 電池(131) |
-| 2 | 148/20 | AngleTune get/set (負値=255-|v|+1) |
-| 2 | 147/19 | TrackingMode get/set |
-| 2 | 141/13 | DPI XY onoff get/set |
-| 3 | 129/1 | ButtonCombine get/set |
-| 3 | 149/21 | SensorOffset get/set (signed) |
-| 3 | 154/26 | SpeedEnable get/set |
-| 4 | 153/25 | ScrollHP get/set |
-| 9 | 154/26 | AdaptiveDPICurve get/set |
-| 10 | 129 | (旧) DPI stage 一括読出 |
-| - | 176 | enterBL `[0,t,1,0,176]` / exitNormal `[0,t,1,0,176,4,1]` |
-| - | 192 | defaultDevice 工場リセット `[0,t,2,0,0,0,192,{1|2}]` |
-| 6 | 129/1/2 | マクロ領域確保/データ/削除 (64B 経路) |
-| 0/16 | 139/129 | DeviceVID/PID 読出・USB PID 変更 (SetUSB1KIDVDPID) |
+| sub | f | cmd get/set | 機能 | 実機応答 (devID=1) |
+|---|---|---|---|---|
+| 2 | 1 | 128/0 * | ポーリング (8,4,2,1,32,64,128→125..8000) | `0x80`=8000Hz |
+| 2 | 1 | 136/8 * | LOD (get 生値 / set: mm値、<1→`*10|128`, 1<v<2→BCD) | `0x87`=0.7mm |
+| 2 | 1 | 130/2 * | activeDPI ステージ | 3 (400/800/1600/3200/6400 中 3番目) |
+| 10 | 1 | 129/- | DPI ステージ一覧 get → `a[8]`=数,以後4B/個 X,Y u16BE | 5個 400/800/1600/3200/6400 |
+| 26 | 1 | -/1 * | DPI ステージ一括 set `[dev,count,4B×N]` | 同値書込み→一致 |
+| 2 | 1 | 137/9 * | MotionSync | 0→1→0 確認 |
+| 2 | 1 | 132/4 | AngleSnap | 0 |
+| 2 | 1 | 138/10 | Ripple | 0 |
+| 2 | 1 | 139/11 | HyperMode | 1 (ON) |
+| 2 | 1 | 147/19 | TrackingMode (high-speed) | 1 |
+| 2 | 1 | 141/13 | DPI XY 個別 | 0 |
+| 2 | 1 | 148/20 | AngleTune 角度 (負値=255-\|v\|+1) | 0 |
+| 2 | 0 | 136/8 | デバウンス | 0 |
+| 2 | 0 | 131/- | 電池 → `[a7,a8]` = (充電?,%) | `[1,100]`=100% |
+| 3 | 0 | 135/7 | スリープ get→`a8<<8|a9` / set u16BE (秒) | 60 (=1min grade) |
+| 1 | 0 | 133/5 | プロファイル get→`a[7]` / set | 1 |
+| 1 | 0 | 130/- | EID → `a[7]`=EID, `a[9..]`=シリアル ASCII | 9, `LZMXU26095581` |
+| 1 | 1 | 143/- | センサー型番 (1=3395,2=3950,4=3955) | 4 → PAW3955 |
+| 16 | 0 | 129/- | FW バージョン → `a[7..10]` | **0.0.3.0** (FWファイル名と一致) |
+| 2 | 2 | 132/4 | DPI インジケーター LED | 0 |
+| 3 | 3 | 129/1 | ButtonCombine | 1 |
+| 3 | 1 | 149/21 | SensorOffset (signed, 値は a[9]/o[8]) | 0 |
+| 3 | 0 | 154/26 | SpeedEnable (移動中LED消灯等の配列) | 1 |
+| 4 | 0 | 153/25 | ScrollHP (高精度ホイール) | `a[10]=0xC8` 等 |
+| 9 | 1 | 154/26 | AdaptiveDPICurve (a[12]=個数,a[13..]ペア) | 曲線データ有り |
+| 1 | 1 | 142/14 | GlassMode (値は a[7]、devID 無し) | 0 |
+| 6 | 4 | 129/- | GetMacroDataSize `[dev,slot]` → a[8..] u32 | 0 |
+| 6 | 4 | -/1 | AllocateMacro `[dev, u16 slot, u32 size]` | - |
+| 0 | 4 | 131/3 | MacroData get/set `[dev,slot,u32 addr,u8 len,data]` sub=7+len | - |
+| 2 | 4 | -/2 | DeleteMacro `[dev,u16 slot]` | - |
+| 0 | 3 | 128/0 * | ボタン get/set — sub=5+len, `[dev,btn,0,type,len,params]` | 全5個 type1 (既定マウスボタン) |
+| 1 | 6 | 139/- | GetDeviceVID/PID `[0,2]` → a[9..12] | `02`…(要調整) |
+| 1 | 16 | 129/- | GetUSBPID → a[11..12] | - |
+| - | - | 176/- | enterBL `[0,t,1,0,176]` / exitNormal `…,4,1` | - |
+| - | - | 192/- | defaultDevice 工場リセット `[0,t,2,0,0,0,192,{1|2}]` | - |
+| 2 | 1 | -/13 | resetProfile `[2,1,0,13]` | - |
 
-ライト (`LightDeviceID=1`): SetLightEffect `[0,dev,0,2,0,effect,speed,bright,color,count,rgb…]`
-/ GetLightEffect 同型 (0x80 応答)。SetLightness `[0,dev,3,2,2,r,n,o]`。
+**ボタン get/set 詳細** (実機読出 + JS enum 確定):
+送信 `sub=5+len`, `[dev,btn,0,type,len,param…]`, get は cmd128+type=255+len=10。
+応答 `c[10]`=type, `c[11]`=len, `c[12..]`=param (実機: 全ボタン type1 param=自身番号)。
 
-### 5.6 留意点
+**type (`vue` enum)**: 0=OFF, 1=ButtonCode, 2=X_Click, 4=KeyboardCode,
+5=ConsumerKeys, 6=PowerKeys, 7=DPI, 8=Profile, 9=FN, 10=Tilt, 12=BatButton,
+13=ReportRate, 14=LOD, 15=Paring, 16/17/18=MacroI/II/III, 19=Lighting, 20=HPMode。
 
-- WebHID filter は VID/PID のみ (usagePage 指定なし) — 実機では
-  レポート ID 8 入出力 + フィーチャー 0 を持つコレクションを開く。
-- 応答判定は「byte0 がコマンドと一致」だけ (エコー検証) — mouse.fit 系より
-  弱い。併用時の混入に注意 (SU66 と同じ扇出問題が起き得る)。
-- `hidIndex` は 64B 応答の先頭レポートID有無 (0 or 1) — 実機でプローブ。
-- `commonDelay` は書込後の待機 (数十ms、コード上 `mySleep` 多用)。
-- 旧プロトコル機種 (IsNewProtocol 未設定) は全コマンド 64B のみ —
-  別クラス (readMouseFlash がスタブ)。
-- FW 更新は enterBL → erase → program (.hex、BL VID/PID テーブルあり) —
-  未実装でよい (公式経由で)。
+**param (type 別)**:
+- 1=マウスボタン `[code]`: 1=L,2=R,3=M,4=Backward,5=Forward,6-8=Button6-8,
+  16=ScrollUp,17=ScrollDown,18=DPIUp,19=DPIDown,20/21=DPILoopUp/Down
+- 2=X_Click `[1,btn,count,int_hi,int_lo]`
+- 4=キーボード `[mod,usage]`: mod はビットマスク (LCtrl1,LShift2,LAlt4,LGUI8,
+  RCtrl16,RShift32,RAlt64,RGUI128), usage=HID usage ID (1バイト)
+- 5=メディア `[usage_hi,usage_lo]` (Consumer usage u16BE): PlayPause=205,
+  Next=181, Prev=182, Stop=183, VolUp=233, VolDown=234, Mute=226, Eject=184,
+  MediaSelect=387, Calc=402, MyComputer=404, Explorer=406, WWWHome=547,
+  WWWRefresh=551, MyMail=394, LightingUp=111, LightingDown=112,
+  SelectApp=419, Copy=539, Cut=540, Paste=541
+- 7=DPI `[op]`: 1=StageUp,2=StageDown,5=StageLock(+4B dpi),6=CycleUp,7=CycleDown
+- 8/13/14=Profile/ReportRate/LOD `[1=Up,2=Down,3=LoopUp,4=LoopDown]`
+- 16=MacroI `[slot_hi,slot_lo,times]`, 17/18=Macro `[slot_hi,slot_lo]`
+- 20=HPMode `[0]`
+- 15=Paring (ペアリング), 19=Lighting, 12=BatButton, 10=Tilt, 9=FN, 6=PowerKeys
+
+**マクロ** (64B 専用領域、EEPROM@768 ではない): Allocate `[2,6,4,1,u16 slot,
+u32 size]`→a[1]==161; GetSize `[2,6,4,129,u16 slot]`; Data set `[2,0,4,3,u16 slot,
+u32 addr,u8 len,data]` sub=7+len; Data get `[2,0,4,131,…]`; Delete `[2,2,4,2,u16 slot]`。
+実機 GetMacroDataSize(0) → size=0 (未割当)。
+
+**ライト** (`LightDeviceID=1`): dev が `data[2]` (他コマンドと異なる):
+`[0,dev,sub,2,cmd,…]`。Get `[0,dev,5+n,2,128,effect,…]`, Set `[0,dev,…,2,0,effect,
+speed,bright,color,count,rgb…]`。effect=0 だと空応答 (1,2,4,5 が有効)。
+SetLightness `[0,dev,3,2,2,r,n,o]` / GetLightness `[0,dev,3,2,130,r,n]`。
+
+### 5.6 留意点 (実機追記)
+
+- **devID=プロファイル番号は必須** — 0 を送ると a2/a3 ack で値がゼロに化ける。
+- 応答タグ `a[1]`: `0xA1`=正常 / `0xA2`,`0xA3`=別 ack (devID=0・引数無効・
+  一部コマンド)。JS は `a[1]==161` を成功判定に使う箇所が多い。
+- `hidIndex=0` 確定 (実機応答は先頭 0x00 のみ、ずれなし)。
+- 16B 経路はこの有線モデルでは存在しない → §5.3/5.4 の EEPROM 手順は
+  8K ドングル (`37B0:0048`) や旧リビジョン用として残す。
+- 自律通知 `[4,type,…]` フレームは feature 経路では観測せず
+  (800ms passive listen で無) — 16B 入力レポート側に出る可能性。
+- WebHID のコレクション選択基準: `collections[0].featureReports[0].items[0]
+  .reportCount==64` — if2 `FFFF:00` が該当 (実機で唯一 feature を応答)。
+- 未検証 (JS 確定・実機未往復): ボタン set 各 type、マクロ確保/転送/削除、
+  ライト effect/輝度、AdaptiveDPI 書込み、スリープ・デバウンス・AngleTune・
+  Tracking・DPI-XY・SensorOffset・SpeedEnable・ScrollHP・GlassMode・
+  ButtonCombine の書込み、プロファイル切替、EID/PID 書込み、
+  電源再投入後の永続性 (ポーリング等の往復は電源内で確認済み)。
+- FW 更新は enterBL → erase → program (.hex、BL=37B0:0044) — 未実装でよい。
