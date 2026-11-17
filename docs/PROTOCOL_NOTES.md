@@ -927,17 +927,16 @@ get/set は cmd が +0x80/同一値の関係。`devID` はプロファイル番�
 | 1 | 6 | 139/- | GetDeviceVID/PID `[0,2]` → a[9..12] | `02`…(要調整) |
 | 1 | 16 | 129/- | GetUSBPID → a[11..12] | - |
 | - | - | 176/- | enterBL `[0,t,1,0,176]` / exitNormal `…,4,1` | - |
-| - | - | 192/- | defaultDevice 工場リセット `[0,t,2,0,0,0,192,{1|2}]` | - |
-| 2 | 1 | -/13 | resetProfile `[2,1,0,13]` | - |
+| 2 | 0 | -/0 | defaultDevice 工場リセット `[2,2,0,0,192,1]` * | 全プロファイル初期化・実機確認 |
+| 2 | 0 | -/13 | resetProfile `[2,1,0,13,dev]` * | dev プロファイル領域を工場初期化・実機確認 |
 
-**ボタン get/set 詳細** (実機 + JS enum 確定):
+**ボタン get/set 詳細** (実機 + JS enum 確定・往復確認済み):
 送信 `sub=5+len`, `[dev,btn,0,type,len,param…]`, get は cmd128+type=255+len=10。
-JS は応答 `c[10]`=type, `c[11]`=len, `c[12..]`=param を期待するが、
-**実機 (FW 0.0.3.0) では read がリクエスト echo のみ返す** (c[9..11]=req[8..10])。
-工場初期状態では一度だけ格納値 (type1 param=自身番号) が返ったが、その後は
-type/d8/len/sub/f 全変形・16B 埋め込み・if1・input report を試しても echo のみ。
-公式 HUB 実通信の USB キャプチャか公式側表示との対比が必要。
-set は JS 形で a1-ack する (書込み受理は確認)。
+応答 `c[9]`=0, `c[10]`=type, `c[11]`=len, `c[12..]`=param — 実機で格納値の
+読み出し・書き込み・再読を往復確認済み。
+**重要**: エントリが空/未初期化だと read は**リクエスト echo** を返す
+(c[9..11]=req[8..10])。探査でボタン領域が壊れたとき全ボタンが echo 化し、
+`setbtn` の書込みでは復旧せず `resetProfile` (領域再初期化) でのみ回復した。
 
 **type (`vue` enum)**: 0=OFF, 1=ButtonCode, 2=X_Click, 4=KeyboardCode,
 5=ConsumerKeys, 6=PowerKeys, 7=DPI, 8=Profile, 9=FN, 10=Tilt, 12=BatButton,
@@ -974,7 +973,12 @@ SetLightness `[0,dev,3,2,2,r,n,o]` / GetLightness `[0,dev,3,2,130,r,n]`。
 
 - **devID=プロファイル番号は必須** — 0 を送ると a2/a3 ack で値がゼロに化ける。
 - 応答タグ `a[1]`: `0xA1`=正常 / `0xA2`,`0xA3`=別 ack (devID=0・引数無効・
-  一部コマンド)。JS は `a[1]==161` を成功判定に使う箇所が多い。
+  一部コマンド・空マクロスロット等)。JS は `a[1]==161` を成功判定に使う。
+- **`a[4]` は応答ペイロード長** (sub の echo ではない) — スカラー応答は 2-3、
+  ボタン 0x0f、EID 0x16(22)、AdaptiveDPI 0x22(34) 等、データ量に応じて変わる。
+- 応答レイアウト再整理: `a[0]`=0, `a[1]`=tag, `a[2]`=dev(ライト系)/0, `a[3]`=b2,
+  `a[4]`=payload len, `a[5]`=f, `a[6]`=cmd(+0x80 で get), `a[7]`=devID,
+  `a[8..]`=値。
 - `hidIndex=0` 確定 (実機応答は先頭 0x00 のみ、ずれなし)。
 - 16B 経路はこの有線モデルでは存在しない → §5.3/5.4 の EEPROM 手順は
   8K ドングル (`37B0:0048`) や旧リビジョン用として残す。
@@ -984,16 +988,25 @@ SetLightness `[0,dev,3,2,2,r,n,o]` / GetLightness `[0,dev,3,2,130,r,n]`。
   .reportCount==64` — if2 `FFFF:00` が該当 (実機で唯一 feature を応答)。
 - **書込み永続性は実機確認済み** — 探査中に設定領域が壊れた際、抜き差し
   (電源再投入) 後も壊れた値が残った → 64B feature 書込みは flash 永続。
-  同時に判明: **マクロ確保/削除・プロファイル系コマンドは設定領域と
-  共有ページを巻き込み得る** (rate=0・LOD=2・hyper=0x4d・ripple=0x22・
-  stage count=2 に化けた) — 探査では送らない方が安全。
-  破壊後は既知の元値を書き戻して復元可能 (p1: rate0x80/stage3/LOD0x87/
-  hyper1/ripple0/track1/5ステージ400-6400 + p2/p3: rate1/stage2/5ステージ)。
-- 未検証 (JS 確定・実機未往復): ボタン read 格納値の取得 (echo のみ)、
-  ボタン set の物理動作、マクロ確保/転送/削除 (危険のため中止)、
-  ライト effect/輝度、AdaptiveDPI 書込み、AngleTune・SensorOffset・
-  ScrollHP・GlassMode・ButtonCombine・DPIインジケータ色の書込み、
-  EID/PID 書込み。スリープ・デバウンス・Tracking・DPI-XY・SpeedEnable は
-  set→get 往復確認済み。プロファイル切替 (cmd5) は ack するが
-  切替後の再読み込み挙動は未確認。
+- **設定領域の破壊と復旧** (実機で完走):
+  - 原因: 広範な探査書込み (恐らくマクロ確保/削除 or 不正引数) が設定領域を
+    破壊 → rate=0・LOD=2・hyper=0x4d・ripple=0x22・ステージ数=2・ボタン全滅。
+  - スカラー書込みでは復旧不可 (値は書けても読みが化け続けた)。
+  - **`resetProfile` `[2,1,0,13,dev]`**: そのプロファイルの領域を工場初期化。
+    実機確認 — ボタン領域・スカラー全て factory 値に戻り read も正常化。
+    未初期化スロット (p4) には a3 拒否。
+  - **`defaultDevice` `[2,2,0,0,192,1]`**: 全工場リセット。実機確認 —
+    全プロファイル初期化・EID/シリアル応答も正常化 (UI の「工場出荷」ボタン)。
+    変種 `defaultDevice4_7_02_c0` `[dev,2,0,0,192]` / `…,192,2` も JS に有り。
+  - 工場デフォルト実測: rate=1(1K)・stage=2・LOD=1(1mm)・sleep=60s・
+    5ステージ・ボタン=type1 自身・MotionSync=1・HyperMode p1=0x64??(不安定値)。
+- **破壊からの復旧手順** (実機で実施): `defaultDevice` → 再列挙待ち →
+  各プロファイルに元値を書き戻し → アイドル数秒 → 読み戻し検証。
+- 未検証 (JS 確定・実機未往復): マクロ確保/転送/削除 (危険のため中止 —
+  上記破壊の最有力原因)、ライト effect/輝度の set (get は実機確認済:
+  effect=0 は a2 空応答、1/2/4/5 は a1+effect echo、lightness r1=0xa9)、
+  AdaptiveDPI 書込み (get は実機確認済: a[4]=0x22 で曲線ペアデータ有り)、
+  EID/PID 書込み、プロファイル切替後の挙動。
+  スリープ・デバウンス・Tracking・DPI-XY・SpeedEnable・MotionSync・
+  SensorOffset・ScrollHP・GlassMode・ボタン get/set は実機往復確認済み。
 - FW 更新は enterBL → erase → program (.hex、BL=37B0:0044) — 未実装でよい。

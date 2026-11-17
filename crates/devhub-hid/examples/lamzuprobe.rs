@@ -1,21 +1,7 @@
-//! ボタン read 最終バリアント + p2/p3 元値リストア。
+//! motionsync=0 に戻す + 残設定の最終確認。
 
 use hidapi::HidApi;
 use std::time::Duration;
-
-fn raw(d: &hidapi::HidDevice, req: &[u8]) -> Option<Vec<u8>> {
-    let mut w = [0u8; 65];
-    for (i, &b) in req.iter().enumerate() {
-        w[1 + i] = b;
-    }
-    d.send_feature_report(&w).ok()?;
-    std::thread::sleep(Duration::from_millis(110));
-    let mut r = [0u8; 65];
-    match d.get_feature_report(&mut r) {
-        Ok(n) => Some(r[..n.min(32)].to_vec()),
-        Err(_) => None,
-    }
-}
 
 fn feat(d: &hidapi::HidDevice, b2: u8, sub: u8, f: u8, cmd: u8, args: &[u8]) -> Option<Vec<u8>> {
     let mut w = [0u8; 65];
@@ -27,7 +13,7 @@ fn feat(d: &hidapi::HidDevice, b2: u8, sub: u8, f: u8, cmd: u8, args: &[u8]) -> 
         w[7 + i] = b;
     }
     d.send_feature_report(&w).ok()?;
-    std::thread::sleep(Duration::from_millis(110));
+    std::thread::sleep(Duration::from_millis(140));
     let mut r = [0u8; 65];
     match d.get_feature_report(&mut r) {
         Ok(n) => Some(r[..n.min(32)].to_vec()),
@@ -50,43 +36,34 @@ fn main() {
     let d = info.open_device(&api).expect("open");
     d.set_blocking_mode(false).ok();
 
-    println!("== btn read variants (btn1, devID1) ==");
-    // [0,0,2,sub,f,128,dev,btn,d8,type,len]
-    for (tag, req) in [
-        ("type=0", &[0, 0, 2, 15, 3, 128, 1, 1, 0, 0, 10][..]),
-        ("d8=1", &[0, 0, 2, 15, 3, 128, 1, 1, 1, 255, 10][..]),
-        ("d8=btn", &[0, 0, 2, 15, 3, 128, 1, 1, 1, 1, 1][..]),
-        ("len=0", &[0, 0, 2, 5, 3, 128, 1, 1, 0, 255, 0][..]),
-        ("len=1 t1", &[0, 0, 2, 6, 3, 128, 1, 1, 0, 1, 1][..]),
-        ("sub=15 no9", &[0, 0, 2, 15, 3, 128, 1, 1, 1, 255, 10][..]),
-        ("cmd128 f=4 b2", &[0, 0, 2, 15, 4, 128, 1, 2, 0, 255, 10][..]),
-        ("cmd128 f=4 b3", &[0, 0, 2, 15, 4, 128, 1, 3, 0, 255, 10][..]),
-        ("cmd128 f=4 b5", &[0, 0, 2, 15, 4, 128, 1, 5, 0, 255, 10][..]),
-        ("cmd128 f=5 b1", &[0, 0, 2, 15, 5, 128, 1, 1, 0, 255, 10][..]),
-    ] {
-        println!("  {tag:12}: {:02x?}", raw(&d, req).map(|v| v[..28].to_vec()));
-    }
+    println!("motionsync set 0: {:02x?}", feat(&d, 2, 2, 1, 9, &[1, 0]).map(|v| v[..12].to_vec()));
+    println!("speeden set 1   : {:02x?}", feat(&d, 2, 3, 0, 26, &[1, 1]).map(|v| v[..12].to_vec()));
+    std::thread::sleep(Duration::from_secs(2));
 
-    println!("== restore p2/p3 (rate=1,stage=2) ==");
-    for p in [2u8, 3] {
-        println!("  p{p} rate1: {:02x?}", feat(&d, 2, 2, 1, 0, &[p, 1]).map(|v| v[..12].to_vec()));
-        println!("  p{p} stage2: {:02x?}", feat(&d, 2, 2, 1, 2, &[p, 2]).map(|v| v[..12].to_vec()));
-        // p2/p3 ステージも p1 と同じ5個に戻す (壊れた stage count=2 を修復)
-        let mut a = vec![p, 5u8];
-        a.extend_from_slice(&[
-            0x01, 0x90, 0x01, 0x90, 0x03, 0x20, 0x03, 0x20, 0x06, 0x40, 0x06, 0x40, 0x0c, 0x80,
-            0x0c, 0x80, 0x19, 0x00, 0x19, 0x00,
-        ]);
-        println!("  p{p} stages: {:02x?}", feat(&d, 2, 26, 1, 1, &a).map(|v| v[..14].to_vec()));
+    println!("== final state (p1) ==");
+    for (tag, b2, sub, f, cmd, args) in [
+        ("poll", 2u8, 2, 1, 128, &[1u8][..]),
+        ("lod", 2, 2, 1, 136, &[1]),
+        ("activedpi", 2, 2, 1, 130, &[1]),
+        ("motionsync", 2, 2, 1, 137, &[1]),
+        ("anglesnap", 2, 2, 1, 132, &[1]),
+        ("ripple", 2, 2, 1, 138, &[1]),
+        ("hyper", 2, 2, 1, 139, &[1]),
+        ("track", 2, 2, 1, 147, &[1]),
+        ("dpixy", 2, 2, 1, 141, &[1]),
+        ("angletune", 2, 2, 1, 148, &[1]),
+        ("debounce", 2, 2, 0, 136, &[1]),
+        ("sleep", 2, 3, 0, 135, &[1]),
+        ("btncomb", 2, 3, 3, 129, &[1]),
+        ("sensoroff", 2, 3, 1, 149, &[1]),
+        ("speeden", 2, 3, 0, 154, &[1]),
+        ("scrollhp", 2, 4, 0, 153, &[1]),
+        ("glass", 2, 1, 1, 142, &[0]),
+        ("battery", 2, 2, 0, 131, &[1]),
+        ("profile", 2, 1, 0, 133, &[1]),
+    ] {
+        println!("  {tag:10}: {:02x?}", feat(&d, b2, sub, f, cmd, args).map(|v| v[6..14].to_vec()));
     }
-    println!("== verify ==");
-    for p in 1..=4u8 {
-        println!(
-            "  p{p}: rate={:02x?} stage={:02x?} cnt={:02x?}",
-            feat(&d, 2, 2, 1, 128, &[p]).map(|v| v[8]),
-            feat(&d, 2, 2, 1, 130, &[p]).map(|v| v[8]),
-            feat(&d, 2, 10, 1, 129, &[p, 1]).map(|v| v[8])
-        );
-    }
+    println!("  stages    : {:02x?}", feat(&d, 2, 10, 1, 129, &[1, 1]).map(|v| v[6..26].to_vec()));
     println!("-- done --");
 }
