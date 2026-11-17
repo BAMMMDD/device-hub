@@ -780,3 +780,137 @@ firmwareMark:"f1", upgradeTogether:true, BottomButton:false, DpiRgb:false, DpiTo
   ドングル FW cmd29。応答は同じ 16B 構造。
 - `is54H20` フラグを持つ機種あり (別 MCU バリアント?)。
 - プローブ: `cargo run -p devhub-hid --example atkprobe` (読み取りのみ)。
+
+## 5. LAMZU Aurora (www.lamzu.net) — MayaX V2 等
+
+解析: `analysis/lamzu-index-*.js` (バンドル), `analysis/lamzu-env-models.json`
+(デバイス定義テーブル、27機種)。未実機検証 — JS 解析のみ。
+
+### 5.1 デバイス識別 (env-models.json)
+
+`./Config/env-models.json` が機種定義。MayaX V2 (UIFolder=`MayaXV2`):
+
+- VID `37B0` / PID wired `001F`。8K ドングル: VID `373E` / PID `0016`。
+  `PIDWireless: 00ff` は `_1KDongle` 空のため別経路 (BLE?)。
+- `IsNewProtocol: "1"`, `IsSensorModelCmd: "1"`, `CoreVersion`, `DPIMax: 30000`,
+  `LOD: "0.7;1;2"`, `DPIMaxStageNum: 5`, `KeyBindingSeq: "01..05"` (5ボタン),
+  `LightEffects: "1,2,4,5"`, `LightDeviceID: "1"`。
+- プロファイル 4 個 (UI 固定 1..4)。
+- `DeviceInitFilterVID: "373E;37B0;"` — 初期スキャン対象 VID。
+- 他機種行も同形式 (Maya/Maya X/Orcus/Atlantis/Thorn 等、VID 37B0/373E 系)。
+
+### 5.2 トランスポート — 2 チャネル併用
+
+新プロトコル機種 (MAYA X V2) は**両方のチャネルを併用**:
+
+1. **16B チャネル** — output report ID 8 (`sendReport(8, buf16)`)、入力は
+   `oninputreport` で 16B。送信時 `buf[15] = get_Crc(buf) - 8`
+   (`get_Crc = 85 - Σbuf[0..14] & 0xFF`)。応答待ちは
+   `retrySetGetWithDelayCompx`: 送信→50ms sleep→`receivedData[0]==cmd`
+   になるまで待つ (WebHUB も「最初の一致フレーム」を応答とみなす)。
+2. **64B フィーチャーチャネル** — `sendFeatureReport(0, buf64)` /
+   `receiveFeatureReport(0)`。センサー系コマンド・ドングル EID・ライト・
+   工場リセットはこちら。フレーム `buf[2]=2, buf[3]=sub, buf[4]=f, buf[5]=cmd,
+   buf[6]=devID, buf[7..]=args` (応答は `a[1-hidIndex]==161` で正常、
+   値は `a[8-hidIndex]` 等 — `hidIndex`∈{0,1} は応答先頭の
+   レポートID有無で実行時にプローブ確定)。
+
+### 5.3 16B チャネル コマンド
+
+| cmd | 方向 | 形式 |
+|---|---|---|
+| 7 | 書 | EEPROM 書込 `[7,0,addr_hi,addr_lo,len(≤10),d0..d9]` |
+| 8 | 読 | EEPROM 読出 `[8,0,addr_hi,addr_lo,len]` → 応答 `b[5..5+len]` |
+| - | 書 | 単値ペア `[7,0,addr_hi,addr_lo,2,v,85-v]` (Set_Device_Eeprom_Value) |
+| 4 | 読 | 電池 `[4]` → `b[5]=%`, `b[6]=充電中フラグ`, `b[7]<<8|b[8]`=電圧 |
+| 5 | - | ペアリングモード `[5,0,0,0,2,0,0,11]` |
+| 9 | - | ClearSetting (工場リセット) |
+| 14 | 読 | 現在プロファイル → `b[5]+1` |
+| 15 | 書 | プロファイル切替 `[15,0,0,0,1,profile-1]` |
+| 18 | 読 | FW バージョン → `b[5].hex.b[6].hex` |
+| 29 | 読 | FW バージョン (DeviceID 0x0 経路) |
+| 1 | 読 | ドングル EID/PR `[1,0,0,0,8,rand×4]` → `b[10]`/`b[11]` |
+| 4 (通知) | ← | デバイス自律通知 `[4,type,...]` (下記) |
+
+**通知フレーム `[4,type,...]`** (UI ハンドラ実測):
+- type1 = DPI切替 `b[2]=stage, b[3..4]=X dpi, b[5..6]=Y dpi`
+- type2 = プロファイル切替, type3 = 電池 `b[2]=%, b[3]=充電`
+- type6 = 接続/切断 `b[2]=1/0`, type7 = LOD `b[2]=生値`
+- type8 = ポーリング `b[2]=生値`, type13 = モード `b[2]=HighSpeed, b[3]=tracking`
+
+### 5.4 EEPROM マップ (Dt)
+
+| addr | 内容 | addr | 内容 |
+|---|---|---|---|
+| 0 | ReportRate (値表) | 169 | DebounceTime |
+| 2 | maxDpiStage | 171 | MotionSync |
+| 4 | CurrentDPI (index-1) | 173 | SleepTime |
+| 10 | LOD | 175 | Angle (snap) |
+| 12 | DPIValue (+stage*4) | 177 | Ripple |
+| 44 | DPIColor (+stage*4, RGB+α) | 181 | PerformanceState |
+| 96 | KeyFunction (+btn*4) | 183 | Performance |
+| 256 | ShortcutKey (+btn*32) | 768 | Macro (+slot*384) |
+
+単値は `(v, 85-v)` ペアで格納 (readMouseFlash は 0x00-0xFF を一括読出)。
+
+- **ReportRate 値表**: 8=125, 4=250, 2=500, 1=1000, 32=2000, 64=4000, 128=8000 Hz
+- **DPI ステージ** @12+i*4: `i=dpi/50-1`、`b[0..1]`=i 下位、
+  `b[2]` ビット2-3/6-7=i 上位、ビット0/1 = ×2 フラグ (両立で×4)。
+  実値 = (packed+1)*50*2^flags。XY 別々時は b[0]/b[1] が X/Y。
+- **LOD**: `<128 → 値=mm` (1=1mm,2=2mm, **3=0.7mm**)、
+  `>=128 → (v-128)/10 mm`。公式は 0.7 を値3で書く。
+- **SleepTime**: 生値*10 = 秒 (10s→1 … 30min→180)。
+- **HyperMode**: PerformanceState@181 に値を書き、Performance@183=3 でコミット。
+- **KeyFunction** @96+btn*4: `[type,param_hi,param_lo,crc]`。
+  `Va` 型: Disable0 MouseKey1 DPISwitch2 FireKey4 ShortcutKey5 Macro6
+  ReportRateSwitch7 DPILock10 UpDownRoll11 (+UI独自 14=LOD loop, 20=HPMode loop)。
+  param: MouseKey 0x0100=L/0x0200=R/0x0400=M, UpDownRoll 0x0100/0x0200,
+  DPISwitch 0x0100=cycle/0x0300=down (up は別値), FireKey=(interval<<8)|count,
+  DPILock=dpi/50-1, Macro=index<<8, ReportRateSwitch/loop 系=0。
+- **ShortcutKey** @256+btn*32: `b[0]=エントリ数*2`, 3B エントリ
+  `[flag|type&0xF, val_lo, val_hi]` ×N + crc。flag: **0x80=press, 0x40=release
+  (逆順)**。type: 1=keyboard (val=HID usage), 2=media (val=consumer usage)。
+  修飾子も通常エントリ (LCtrl=224 等)。メディア例: `[2,0x82,lo,hi,0x42,lo,hi,0]`。
+- **Macro** @768+slot*384: `+0`=name len(≤30) + GBK name、`+31`=イベント数(≤70)、
+  `+32` から 5B/イベント `[flag<<6|type, val_lo, val_hi, delay_hi, delay_lo]`。
+  flag 同上 (press=2<<6=0x80, release=1<<6=0x40)。
+
+### 5.5 64B チャネル (センサー系, `IsSensorModelCmd`)
+
+`[0,0,2,sub,f,cmd,devID,args...]` 形式 (devID=profile index):
+
+| sub | cmd | 機能 |
+|---|---|---|
+| 1 | 14/142 | GlassMode set/get |
+| 1 | 130 | EID (ドングル) → b[6]==130?b[7]:(b[5]==130?b[6]:0) |
+| 1 | 13 | resetProfile `[2,1,0,13]` |
+| 2 | 128/… | polling get / DPI indicator(132 get,4 set) / 電池(131) |
+| 2 | 148/20 | AngleTune get/set (負値=255-|v|+1) |
+| 2 | 147/19 | TrackingMode get/set |
+| 2 | 141/13 | DPI XY onoff get/set |
+| 3 | 129/1 | ButtonCombine get/set |
+| 3 | 149/21 | SensorOffset get/set (signed) |
+| 3 | 154/26 | SpeedEnable get/set |
+| 4 | 153/25 | ScrollHP get/set |
+| 9 | 154/26 | AdaptiveDPICurve get/set |
+| 10 | 129 | (旧) DPI stage 一括読出 |
+| - | 176 | enterBL `[0,t,1,0,176]` / exitNormal `[0,t,1,0,176,4,1]` |
+| - | 192 | defaultDevice 工場リセット `[0,t,2,0,0,0,192,{1|2}]` |
+| 6 | 129/1/2 | マクロ領域確保/データ/削除 (64B 経路) |
+| 0/16 | 139/129 | DeviceVID/PID 読出・USB PID 変更 (SetUSB1KIDVDPID) |
+
+ライト (`LightDeviceID=1`): SetLightEffect `[0,dev,0,2,0,effect,speed,bright,color,count,rgb…]`
+/ GetLightEffect 同型 (0x80 応答)。SetLightness `[0,dev,3,2,2,r,n,o]`。
+
+### 5.6 留意点
+
+- WebHID filter は VID/PID のみ (usagePage 指定なし) — 実機では
+  レポート ID 8 入出力 + フィーチャー 0 を持つコレクションを開く。
+- 応答判定は「byte0 がコマンドと一致」だけ (エコー検証) — mouse.fit 系より
+  弱い。併用時の混入に注意 (SU66 と同じ扇出問題が起き得る)。
+- `hidIndex` は 64B 応答の先頭レポートID有無 (0 or 1) — 実機でプローブ。
+- `commonDelay` は書込後の待機 (数十ms、コード上 `mySleep` 多用)。
+- 旧プロトコル機種 (IsNewProtocol 未設定) は全コマンド 64B のみ —
+  別クラス (readMouseFlash がスタブ)。
+- FW 更新は enterBL → erase → program (.hex、BL VID/PID テーブルあり) —
+  未実装でよい (公式経由で)。
