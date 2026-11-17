@@ -1,33 +1,24 @@
-//! ライト lightness no-op 書き込み検証 + マクロ read の安全確認。
+//! AdaptiveDPI no-op 書き込み検証 (get の同値を set に流す)。
 
 use hidapi::HidApi;
 use std::time::Duration;
 
-fn raw65(d: &hidapi::HidDevice, body: &[u8]) -> Option<Vec<u8>> {
+fn feat(d: &hidapi::HidDevice, b2: u8, sub: u8, f: u8, cmd: u8, args: &[u8]) -> Option<Vec<u8>> {
     let mut w = [0u8; 65];
-    for (i, &b) in body.iter().enumerate() {
-        w[1 + i] = b;
+    w[3] = b2;
+    w[4] = sub;
+    w[5] = f;
+    w[6] = cmd;
+    for (i, &b) in args.iter().enumerate() {
+        w[7 + i] = b;
     }
     d.send_feature_report(&w).ok()?;
     std::thread::sleep(Duration::from_millis(120));
     let mut r = [0u8; 65];
     match d.get_feature_report(&mut r) {
-        Ok(n) => Some(r[..n.min(32)].to_vec()),
+        Ok(n) => Some(r[..n.min(44)].to_vec()),
         Err(_) => None,
     }
-}
-
-fn light(d: &hidapi::HidDevice, dev: u8, sub: u8, cmd: u8, args: &[u8]) -> Option<Vec<u8>> {
-    // 実機確認済みレイアウト: [0, dev, 0, sub, 2, cmd, args...]
-    let mut body = vec![0u8, dev, 0, sub, 2, cmd];
-    body.extend_from_slice(args);
-    raw65(d, &body)
-}
-
-fn feat(d: &hidapi::HidDevice, b2: u8, sub: u8, f: u8, cmd: u8, args: &[u8]) -> Option<Vec<u8>> {
-    let mut body = vec![0u8, 0, b2, sub, f, cmd];
-    body.extend_from_slice(args);
-    raw65(d, &body)
 }
 
 fn main() {
@@ -45,17 +36,18 @@ fn main() {
     let d = info.open_device(&api).expect("open");
     d.set_blocking_mode(false).ok();
 
-    // lightness get → 同値 set (no-op)
-    let g = light(&d, 1, 3, 130, &[1, 0]);
-    println!("lightness get r1: {:02x?}", g);
-    // JS: SetLightness [0,dev,3,2,2,r,n,o]; get r,n = a[8..10]
-    let (r, n, o) = g.as_ref().map(|v| (v[8], v[9], v[10])).unwrap_or((0, 0xa9, 0));
-    println!("lightness set same (r={r},n={n},o={o}): {:02x?}", light(&d, 1, 3, 2, &[r, n, o]));
-    println!("lightness get again: {:02x?}", light(&d, 1, 3, 130, &[1, 0]));
-
-    // マクロ read のみ (安全) — 未割当スロットの応答確認
-    for slot in [0u8, 1, 2] {
-        println!("macrosize s{slot}: {:02x?}", feat(&d, 2, 6, 4, 129, &[1, 0, slot]));
+    let g = feat(&d, 2, 9, 1, 154, &[1]);
+    println!("get: {:02x?}", g);
+    if let Some(v) = &g {
+        let enable = v[8];
+        let count = v[12] as usize;
+        // data = a[13..13+count*4] (u16BE ×2 per point, count ポイント)
+        let mut args = vec![1u8, enable, 0, count as u8];
+        args.extend_from_slice(&v[13..13 + count * 4]);
+        println!("set same (enable={enable} count={count}): {:02x?}",
+            feat(&d, 2, (4 + count * 4) as u8, 1, 26, &args));
+        std::thread::sleep(Duration::from_millis(300));
+        println!("get again: {:02x?}", feat(&d, 2, 9, 1, 154, &[1]));
     }
     println!("-- done --");
 }

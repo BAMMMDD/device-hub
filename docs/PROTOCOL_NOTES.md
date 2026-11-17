@@ -921,7 +921,7 @@ get/set は cmd が +0x80/同一値の関係。`devID` はプロファイル番�
 | 3 | 1 | 149/21 | SensorOffset (signed, 値は a[9]/o[8]) | 0 |
 | 3 | 0 | 154/26 | SpeedEnable (移動中LED消灯等の配列) | 1 |
 | 4 | 0 | 153/25 | ScrollHP (高精度ホイール) | `a[10]=0xC8` 等 |
-| 9 | 1 | 154/26 | AdaptiveDPICurve (a[12]=個数,a[13..]ペア) | 曲線データ有り |
+| 9 | 1 | 154/26 * | AdaptiveDPICurve — get→`a[8]`=enable,`a[12]`=個数,`a[13..]`=(u16BE speed,dpi)×N / set `[dev,en,0,N,data]` sub=4+len | en=0, N=3 (0,100)(20,100)(40,100) |
 | 1 | 1 | 142/14 | GlassMode (値は a[7]、devID 無し) | 0 |
 | 6 | 4 | 129/- | GetMacroDataSize `[dev,slot]` → a[8..] u32 | 0 |
 | 6 | 4 | -/1 | AllocateMacro `[dev, u16 slot, u32 size]` | - |
@@ -968,10 +968,15 @@ u32 size]`→a[1]==161; GetSize `[2,6,4,129,u16 slot]`; Data set `[2,0,4,3,u16 s
 u32 addr,u8 len,data]` sub=7+len; Data get `[2,0,4,131,…]`; Delete `[2,2,4,2,u16 slot]`。
 実機 GetMacroDataSize(0) → size=0 (未割当)。
 
-**ライト** (`LightDeviceID=1`): dev が `data[2]` (他コマンドと異なる):
-`[0,dev,sub,2,cmd,…]`。Get `[0,dev,5+n,2,128,effect,…]`, Set `[0,dev,…,2,0,effect,
-speed,bright,color,count,rgb…]`。effect=0 だと空応答 (1,2,4,5 が有効)。
-SetLightness `[0,dev,3,2,2,r,n,o]` / GetLightness `[0,dev,3,2,130,r,n]`。
+**ライト** (`LightDeviceID=1`, dev は通常通り body[2] — JS `i[2]=t`):
+- GetLightness `[0,0,1,3,2,130,profile,n]` → `a[9]`=輝度0-255 *実機確認*
+- SetLightness `[0,0,1,3,2,2,profile,n,bright]` → a1 受理 *実機確認 (同値書込)*
+- GetLightEffect `[0,0,1,5+s,2,128,profile,effect]` → a[8..12]=4 params +
+  a[12..]=色バイト。s=期待色数。実機: 1/2/4/5 は a1、effect=0 は a2、
+  但し params が全0 (この有線機は RGB 非実装の可能性 — env の
+  `EffectList=1,2,4,5` はドングル側かも)
+- SetLightEffect `[0,0,1,5+len,2,0,profile,effect,speed,bright,color,count,rgb…]`
+  (JS 確定・実機未往復)
 
 ### 5.6 留意点 (実機追記)
 
@@ -1006,13 +1011,10 @@ SetLightness `[0,dev,3,2,2,r,n,o]` / GetLightness `[0,dev,3,2,130,r,n]`。
     5ステージ・ボタン=type1 自身・MotionSync=1・HyperMode p1=0x64??(不安定値)。
 - **破壊からの復旧手順** (実機で実施): `defaultDevice` → 再列挙待ち →
   各プロファイルに元値を書き戻し → アイドル数秒 → 読み戻し検証。
-- 未検証 (JS 確定・実機未往復): マクロ確保/転送/削除 (危険のため中止 —
-  上記破壊の最有力原因; GetMacroDataSize は安全でスロット0-2全て a2=空
-  と実機確認)、ライト effect/輝度の set (get は実機確認済: effect=0 は
-  a2 空応答、1/2/4/5 は a1+effect echo、lightness r1=現在0xff=最大輝度;
-  JS 形 `[r,n,o]` set は a2 拒否 → 引数意味が異なる可能性)、
-  AdaptiveDPI 書込み (get は実機確認済: a[4]=0x22 で曲線ペアデータ有り)、
-  EID/PID 書込み。
+- 未検証 (JS 確定・実機未往復): **マクロ確保/転送/削除のみ** (危険のため
+  中止 — 上記破壊の最有力原因; GetMacroDataSize は安全でスロット0-2
+  全て a2=空と実機確認)、SetLightEffect (lightness get/set は往復確認済)、
+  EID/PID 書込み、ScrollHP・SensorOffset の書込み (get 確認済)。
   プロファイル切替 `[2,1,0,5,prof]` も往復確認 (get は `a[7]`=現行、
   切替後の設定保持も確認)。スリープ・デバウンス・Tracking・DPI-XY・
   SpeedEnable・MotionSync・SensorOffset・ScrollHP・GlassMode・
