@@ -1299,25 +1299,9 @@ fn build_caps(info: &DeviceInfo, m: &R8Model) -> Capabilities {
             ),
             // 公式は「有効トグル + 感度 1-10」。EEPROM byte = enable<<7 | value。
             SettingSpec::toggle("ms_fast_left_en", MAGNETIC, "L ラピッドトリガー"),
-            SettingSpec::slider(
-                "ms_fast_left",
-                MAGNETIC,
-                "L RT 感度",
-                1.,
-                10.,
-                1.,
-                "",
-            ),
+            SettingSpec::slider("ms_fast_left", MAGNETIC, "L RT 感度", 1., 10., 1., ""),
             SettingSpec::toggle("ms_fast_right_en", MAGNETIC, "R ラピッドトリガー"),
-            SettingSpec::slider(
-                "ms_fast_right",
-                MAGNETIC,
-                "R RT 感度",
-                1.,
-                10.,
-                1.,
-                "",
-            ),
+            SettingSpec::slider("ms_fast_right", MAGNETIC, "R RT 感度", 1., 10., 1., ""),
         ]);
     }
     if m.spdt {
@@ -2093,10 +2077,7 @@ mod tests {
     #[test]
     fn shortcut_matches_device_fixture() {
         // HTS Plus Pro 実機ダンプ (公式 Hub 書込後): usage31 = `02 81 1f 00 41 1f 00 53`。
-        let b = encode_shortcut(&KeyStroke {
-            mods: 0,
-            usage: 31,
-        });
+        let b = encode_shortcut(&KeyStroke { mods: 0, usage: 31 });
         assert_eq!(b, vec![0x02, 0x81, 0x1f, 0x00, 0x41, 0x1f, 0x00, 0x53]);
     }
 

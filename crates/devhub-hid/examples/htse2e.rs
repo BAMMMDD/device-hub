@@ -69,7 +69,10 @@ fn ee_u8(dev: &hidapi::HidDevice, addr: u16) -> Option<u8> {
 }
 
 fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" ")
+    b.iter()
+        .map(|x| format!("{x:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn dump(dev: &hidapi::HidDevice) {
@@ -180,7 +183,10 @@ fn drv() {
     })
     .unwrap();
     let st = drv.read().unwrap();
-    check!("en=true readback", get(&st, "ms_fast_left_en") == Some(SettingValue::Bool(true)));
+    check!(
+        "en=true readback",
+        get(&st, "ms_fast_left_en") == Some(SettingValue::Bool(true))
+    );
     check!(
         "value preserved on enable",
         get(&st, "ms_fast_left") == get(&st0, "ms_fast_left")
@@ -191,7 +197,10 @@ fn drv() {
     })
     .unwrap();
     let st = drv.read().unwrap();
-    check!("value=7 readback", get(&st, "ms_fast_left") == Some(SettingValue::Num(7.)));
+    check!(
+        "value=7 readback",
+        get(&st, "ms_fast_left") == Some(SettingValue::Num(7.))
+    );
     check!(
         "en still true after value write",
         get(&st, "ms_fast_left_en") == Some(SettingValue::Bool(true))
@@ -217,7 +226,10 @@ fn drv() {
     })
     .unwrap();
     let st = drv.read().unwrap();
-    check!("set 10 → readback 10", get(&st, "ms_trigger_left") == Some(SettingValue::Num(10.)));
+    check!(
+        "set 10 → readback 10",
+        get(&st, "ms_trigger_left") == Some(SettingValue::Num(10.))
+    );
     if let Some(v) = t0 {
         drv.apply(&Change::Setting {
             id: "ms_trigger_left".into(),
@@ -250,7 +262,10 @@ fn drv() {
     .unwrap();
     let st = drv.read().unwrap();
     let b3 = st.mouse.as_ref().unwrap().buttons[3].clone();
-    check!("slot3 = Ctrl+Shift+A", matches!(b3, ButtonAction::Key(k) if k.mods == 0b11 && k.usage == 4));
+    check!(
+        "slot3 = Ctrl+Shift+A",
+        matches!(b3, ButtonAction::Key(k) if k.mods == 0b11 && k.usage == 4)
+    );
     // マウス「戻る」 (type1 — shortcut 領域は残るが type で無効化)
     drv.apply(&Change::Button {
         slot: 3,
@@ -274,8 +289,17 @@ fn drv() {
         drv.apply(&Change::Setting { id, value: v }).unwrap();
     }
     let st = drv.read().unwrap();
-    println!("restored settings: {:?}", st.settings.iter().filter(|(k, _)| k.starts_with("ms_")).collect::<Vec<_>>());
-    println!("restored slot3: {:?}", st.mouse.as_ref().unwrap().buttons[3]);
+    println!(
+        "restored settings: {:?}",
+        st.settings
+            .iter()
+            .filter(|(k, _)| k.starts_with("ms_"))
+            .collect::<Vec<_>>()
+    );
+    println!(
+        "restored slot3: {:?}",
+        st.mouse.as_ref().unwrap().buttons[3]
+    );
     println!("== {} ==", if fails == 0 { "ALL PASS" } else { "FAILURES" });
 }
 
@@ -318,10 +342,14 @@ fn e2e(dev: &hidapi::HidDevice) {
     };
     ee_write(dev, 256 + 3 * 32, &media);
     std::thread::sleep(Duration::from_millis(50));
-    ee_write(dev, 96 + 3 * 4, &[5, 0, 0, {
-        let r = [5u8, 0, 0];
-        85u8.wrapping_sub(r.iter().map(|&x| x as u32).sum::<u32>() as u8)
-    }]);
+    ee_write(
+        dev,
+        96 + 3 * 4,
+        &[5, 0, 0, {
+            let r = [5u8, 0, 0];
+            85u8.wrapping_sub(r.iter().map(|&x| x as u32).sum::<u32>() as u8)
+        }],
+    );
     let rb = ee_read(dev, 256 + 3 * 32, 8);
     println!("  shortcut write -> read [{}]", hex(&rb));
     let kf3 = ee_read(dev, 96 + 3 * 4, 4);

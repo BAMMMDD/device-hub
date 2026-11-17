@@ -44,7 +44,10 @@ fn main() -> devhub_core::backend::HubResult<()> {
             last = std::time::Instant::now();
         }
     }
-    println!("B got {got} frames in 10s after A closed (last at {:.1}s)", last.duration_since(start).as_secs_f64());
+    println!(
+        "B got {got} frames in 10s after A closed (last at {:.1}s)",
+        last.duration_since(start).as_secs_f64()
+    );
     if got == 0 {
         println!("=> stream dies when the arming handle closes");
     } else {

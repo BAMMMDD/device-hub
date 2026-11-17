@@ -824,8 +824,7 @@ impl XsydDriver {
                     if self.note_axis_frame(&b) {
                         if b[2] == kind && b[3] == row {
                             self.fails.store(0, Ordering::Relaxed);
-                            *self.dead_since.lock().unwrap_or_else(|p| p.into_inner()) =
-                                None;
+                            *self.dead_since.lock().unwrap_or_else(|p| p.into_inner()) = None;
                             return Ok(self
                                 .axis_cache
                                 .lock()
@@ -2672,8 +2671,7 @@ impl DeviceDriver for XsydDriver {
     /// 更新が飛び飛びになる)。公式 HUB 等の別プロセスが会話中ならその応答に
     /// 相乗りして自分は送信を休む (受動モード)。
     fn live_axis(&self) -> HubResult<Vec<AxisSample>> {
-        const KINDS: [u8; 4] =
-            [axis::ADC, axis::ROUTE, axis::CALIBRATE, axis::KEY_STATUS];
+        const KINDS: [u8; 4] = [axis::ADC, axis::ROUTE, axis::CALIBRATE, axis::KEY_STATUS];
         // 視覚的な滑らかさに効く 2 種は ~ポーリング毎、変化の少ない 2 種は間引く。
         let fresh_for = |kind: u8| match kind {
             k if k == axis::ROUTE || k == axis::KEY_STATUS => Duration::from_millis(60),
@@ -3115,10 +3113,7 @@ mod tests {
     fn drain_ignores_own_command_responses() {
         let d = mock_driver();
         // 自分が [3,1] を直前に送っていた状況 → その応答は外部ではない。
-        d.cmd_self
-            .lock()
-            .unwrap()
-            .insert((3, 1), Instant::now());
+        d.cmd_self.lock().unwrap().insert((3, 1), Instant::now());
         let mut f = vec![3u8, 1];
         f.resize(64, 0);
         d.ch.mock_reply(&f);

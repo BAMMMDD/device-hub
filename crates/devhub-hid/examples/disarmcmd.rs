@@ -7,10 +7,7 @@ fn axis_frames(dev: &hidapi::HidDevice, ms: u64) -> u32 {
     let mut n = 0;
     let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
     while std::time::Instant::now() < end {
-        if dev.read_timeout(&mut buf, 10).unwrap_or(0) > 0
-            && buf[0] == 4
-            && buf[1] == 3
-        {
+        if dev.read_timeout(&mut buf, 10).unwrap_or(0) > 0 && buf[0] == 4 && buf[1] == 3 {
             n += 1;
         }
     }
@@ -63,7 +60,10 @@ fn main() -> devhub_core::backend::HubResult<()> {
         cmd[1..1 + body.len()].copy_from_slice(body);
         dev.write(&cmd).expect("send candidate");
         let n = axis_frames(&dev, 800);
-        println!("{name:34} -> {n} axis frames/800ms {}", if n == 0 { "<<< DISARMED" } else { "" });
+        println!(
+            "{name:34} -> {n} axis frames/800ms {}",
+            if n == 0 { "<<< DISARMED" } else { "" }
+        );
     }
     Ok(())
 }
