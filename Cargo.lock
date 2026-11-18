@@ -1255,7 +1255,7 @@ dependencies = [
 
 [[package]]
 name = "device-hub"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "devhub-core",
  "devhub-hid",
