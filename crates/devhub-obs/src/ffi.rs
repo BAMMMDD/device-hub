@@ -101,6 +101,9 @@ pub struct Api {
     pub props_add_list:
         unsafe extern "C" fn(*mut c_void, *const u8, *const u8, i32, i32) -> *mut c_void,
     pub props_add_text: unsafe extern "C" fn(*mut c_void, *const u8, *const u8, i32) -> *mut c_void,
+    pub enter_graphics: unsafe extern "C" fn(),
+    pub leave_graphics: unsafe extern "C" fn(),
+    pub props_add_int: unsafe extern "C" fn(*mut c_void, *const u8, *const u8, i32, i32, i32) -> *mut c_void,
     pub props_add_int_slider:
         unsafe extern "C" fn(*mut c_void, *const u8, *const u8, i32, i32, i32) -> *mut c_void,
     pub props_add_float_slider:
@@ -111,7 +114,9 @@ pub struct Api {
     pub prop_list_add_str: unsafe extern "C" fn(*mut c_void, *const u8, *const u8) -> usize,
     /// `obs_module_get_locale_string(module, key)` — OBS ロケール (en-US 既定 +
     /// UI 言語の ini で上書き) から訳文を引く。未登録/見つからないときは NULL。
-    pub module_locale: Option<unsafe extern "C" fn(*mut c_void, *const u8) -> *const u8>,
+    pub load_locale: unsafe extern "C" fn(*mut c_void, *const u8, *const u8) -> *mut c_void,
+    pub lookup_string: unsafe extern "C" fn(*mut c_void, *const u8, *mut *const u8) -> bool,
+    pub free_lookup: unsafe extern "C" fn(*mut c_void),
     pub data_get_bool: unsafe extern "C" fn(*mut c_void, *const u8) -> bool,
     pub data_get_int: unsafe extern "C" fn(*mut c_void, *const u8) -> i64,
     pub data_get_double: unsafe extern "C" fn(*mut c_void, *const u8) -> f64,
@@ -231,6 +236,9 @@ pub fn resolve() -> Option<&'static Api> {
                 "obs_properties_add_text",
                 unsafe extern "C" fn(*mut c_void, *const u8, *const u8, i32) -> *mut c_void
             ),
+            enter_graphics: need!("obs_enter_graphics", unsafe extern "C" fn()),
+            leave_graphics: need!("obs_leave_graphics", unsafe extern "C" fn()),
+            props_add_int: need!("obs_properties_add_int", unsafe extern "C" fn(*mut c_void, *const u8, *const u8, i32, i32, i32) -> *mut c_void),
             props_add_int_slider: need!(
                 "obs_properties_add_int_slider",
                 unsafe extern "C" fn(*mut c_void, *const u8, *const u8, i32, i32, i32)
@@ -259,10 +267,9 @@ pub fn resolve() -> Option<&'static Api> {
                 "obs_property_list_add_string",
                 unsafe extern "C" fn(*mut c_void, *const u8, *const u8) -> usize
             ),
-            module_locale: want!(
-                "obs_module_get_locale_string",
-                unsafe extern "C" fn(*mut c_void, *const u8) -> *const u8
-            ),
+            load_locale: need!("obs_module_load_locale", unsafe extern "C" fn(*mut c_void, *const u8, *const u8) -> *mut c_void),
+            lookup_string: need!("text_lookup_getstr", unsafe extern "C" fn(*mut c_void, *const u8, *mut *const u8) -> bool),
+            free_lookup: need!("text_lookup_destroy", unsafe extern "C" fn(*mut c_void)),
             data_get_bool: need!(
                 "obs_data_get_bool",
                 unsafe extern "C" fn(*mut c_void, *const u8) -> bool

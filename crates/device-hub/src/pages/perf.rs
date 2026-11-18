@@ -219,17 +219,36 @@ impl Shell {
         let labels: Vec<String> = options.iter().map(|o| o.label.clone()).collect();
         let sel = cur.and_then(|c| options.iter().position(|o| o.value == c));
         let (sp2, opts) = (sp.clone(), options.clone());
-        // 実測 (Raw Input)。
-        let live = self.cur().and_then(|s| s.poll.clone()).map(|st| {
+        // 実測 (Raw Input)。USB 計測中は同じスナップショットを計測元つきで併記する。
+        let live = self.cur().and_then(|s| s.poll.as_ref()).map(|st| {
             let v = st.peak_hz.or(st.seg_hz).unwrap_or(st.hz);
             if !self.last_window_active {
-                "実測: 背面では OS が制限中".to_string()
+                format!("背面の受信 {:.0} 件/秒 (参考値)", st.hz)
             } else if v < 1. {
                 "実測: マウスを動かすと表示".to_string()
             } else {
                 format!("実測ピーク {v:.0} Hz")
             }
         });
+        let live = match self.cur().and_then(|s| {
+            self.usb_cap
+                .as_ref()
+                .filter(|(cid, _)| cid == &s.id)
+                .map(|(_, c)| self.usb_snap.unwrap_or_else(|| c.snapshot()))
+        }) {
+            Some(snap) => {
+                let u = match snap.status {
+                    devhub_polling::Status::Waiting => "USB 計測: 待機中".to_string(),
+                    devhub_polling::Status::Live => format!("USB 実測 {} Hz", snap.hz),
+                    _ => "USB 計測: 停止".to_string(),
+                };
+                Some(match live {
+                    Some(l) => format!("{l} · {u}"),
+                    None => u,
+                })
+            }
+            None => live,
+        };
         let body = div()
             .flex()
             .flex_col()

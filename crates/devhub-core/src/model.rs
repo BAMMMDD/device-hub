@@ -1271,7 +1271,13 @@ pub enum Change {
 }
 
 impl Change {
-    /// 同じ対象への変更か (UI のキューで古い方を捨てる = ドラッグ中の連続送信を間引く)。
+    /// 後続の変更だけを実行しても、先行変更の設定がすべて反映されるか。
+    pub fn is_superseded_by(&self, next: &Change) -> bool {
+        self.same_target(next)
+            && !matches!((self, next), (Self::PeqAll { .. }, Self::Peq { .. }))
+    }
+
+    /// 同じ対象への変更か。EQ の一括変更と個別変更には対象の重なりがある。
     pub fn same_target(&self, other: &Change) -> bool {
         use Change::*;
         match (self, other) {

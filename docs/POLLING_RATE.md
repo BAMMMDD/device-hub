@@ -2,6 +2,34 @@
 
 症状: HTS Plus Pro を 8K に設定しているのに「ポーリング実測」が ~2700Hz。
 
+## Windows でゲームを前面にしたまま測る (2026-11-18)
+
+Device HUB のテスト画面は Windows がアプリへ配信したイベントを数える。背面のマウス入力は OS がまとめて配信するため、受信件数から元の転送件数を復元できない。USB 有線マウスと USB ドングルでは、USBPcap でマウス移動用の interrupt IN エンドポイントの転送完了を数えると、ウィンドウのフォーカスに依存せず比較できる。ドングルで測れるのはドングルから PC への転送。Bluetooth はこの手順の対象外。[Microsoft の背景説明](https://blogs.windows.com/windowsdeveloper/2023/05/26/delivering-delightful-performance-for-more-than-one-billion-users-worldwide/)・[USBPcap の手順](https://desowin.org/usbpcap/tour.html)
+
+### アプリから測る (USBPcap のみ必要 — Python/TShark 不要)
+
+計測器は `crates/devhub-polling` (USBPcap ドライバを直接開く Rust 実装)。OBS の「Device HUB USB Polling Rate」ソースと同じ値が出る。実機検証済 (2026-11-18, G-Wolves Receiver RS 8K @ USBPcap2/addr2/EP0x81 — 連続移動で ~7,800Hz・ピーク 7,923Hz)。管理者権限が必要。
+
+1. [USBPcap](https://desowin.org/usbpcap/) を導入して再起動する (初回のみ)。ハブの読み書きオープンには管理者権限が要る環境がある — 「権限不足」と出たら Device HUB を管理者として起動し直す。
+2. デバイスの「テスト」タブ →「ポーリング実測」→ 計測方式を **USB 転送 (USBPcap)** にする。
+3. 「対象デバイス」の一覧から製品名で選ぶ — ハブ番号と USB アドレスは自動で入る (列挙は権限不要・`IOCTL_USBPCAP_GET_HUB_SYMLINK` と構成マネージャで対応付ける。抜き差し・ポート変更後は「更新」で再スキャン)。IN EP は「EP 自動検出」で対象を動かしながら 3 秒数えて最も多いものを採用できる。分からない場合や手動指定したい場合は下の詳細フィールド (ハブ番号・USB アドレス・IN EP 番号 0x81→1・Report ID -1=全件) で直接入れられる。診断用に `cargo run --release -p devhub-polling --example usbenum` (列挙、権限不要) / `usbscan <hub> [秒]` (ハブ全体スキャン、要管理者) / `usbfind <hub> <addr> [秒]` (EP 検出、要管理者) の各プローブも残してある。アドレスは抜き差しで変わる。
+4. 別アプリを前面にしたまま数秒間動かす。「期間内の最高」は受信ごとに (t−1秒, t] の件数を更新するので、表示更新の間の山も取りこぼさない。「停止」で終わると対象・計測元・最高値が残る。同じハブを同時に掴めるのは 1 プロセス (OBS の USB ソースや TShark と同時計測は不可 — 「ハブ使用中」と出る)。
+
+### TShark スクリプトで測る (比較用の別経路)
+
+1. Windows で Wireshark の TShark と USBPcap を用意する。Wireshark のキャプチャ設定で、対象マウスが接続された USBPcap インターフェースと USB デバイスアドレスを調べる。短く試し撮りし、移動に連動する HID マウスの interrupt IN を選ぶ。パケット詳細からバス番号とエンドポイントアドレスを読む。再接続後はデバイスアドレスを再確認する。
+2. 下記の値を実機のものに置き換えて実行し、ゲームに戻って数秒間マウスを動かす。インターフェース名は `tshark -D` の USBPcap の名前。キャプチャ権限が必要な環境では管理者 PowerShell を使う。
+
+   ```powershell
+   .\scripts\measure-usb-rate.ps1 -Interface '\\.\USBPcap1' -Bus 1 -Device 5 -Endpoint 0x81 -Seconds 10
+   ```
+
+3. 終了時の表で、動かし続けた **丸 1 秒の行の Frames** を読む。例えば 7,950 件ならその秒の実測は 7,950 転送/秒。先頭・末尾の端数区間は除く。ゼロが続く場合は、選んだアドレスとエンドポイントのパケットが試し撮りにあるか確認する。フィルタは成功・データあり・受信完了を条件にする。同じエンドポイントに複数の Report ID が混在する機種では合計値になる。アイドル時の USB ポーリング試行や無線区間の周期は観測できない。
+
+Wireshark で対象デバイスに限定して保存した USBPcap キャプチャも `-CaptureFile .\mouse.pcapng` を `-Interface` の代わりに指定して解析できる。前面と背面を比較するときは DPI・設定レート・動かし方を揃える。[Wireshark の USB フィールド](https://www.wireshark.org/docs/dfref/u/usb.html)
+
+アプリ内の配信間隔は µs 単位で記録し、履歴表示は直近 60 バケットに制限する。まとめ読みした入力にはバッチ単位の時刻が付くため、中央値は参考値。連続区間の判定は 125 Hz (8 ms 間隔) を含めるため 12 ms まで許容する。以下は 11 月 16 日時点の調査記録。
+
 ## 1. 今の計測の仕組み
 - `devhub-obs/src/rawinput.rs`: メッセージ専用ウィンドウで Raw Input (マウス/キーボード) を `RIDEV_INPUTSINK` 受信し、
   `WM_INPUT` 1 通ごとに `GetRawInputData` → hDevice ごとに時刻を記録。

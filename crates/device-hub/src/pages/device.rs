@@ -400,7 +400,7 @@ impl Shell {
         // 実測ポーリングレート (Raw Input で数えた input report 到達レート)。
         // 背面では Windows 11 が raw input を制限するため、値は信用できない。
         // 大きな数字は「ピーク」(動いている区間の最大 — 詳細はテストタブ)。
-        if let Some(st) = self.cur().and_then(|s| s.poll.clone()) {
+        if let Some(st) = self.cur().and_then(|s| s.poll.as_ref()) {
             let bg = !self.last_window_active;
             let p = theme::pal();
             let big = st.peak_hz.or(st.seg_hz).unwrap_or(st.hz);
@@ -418,13 +418,13 @@ impl Shell {
                                     .when(bg, |d| d.text_color(p.faint)),
                             )
                             .child(ui::faint(if bg {
-                                "背面のため OS が入力を制限中 — 計測はこの窓を前面にして".into()
+                                format!("背面の受信 {:.0} 件/秒 (参考値)", st.hz)
                             } else if big < 1. {
                                 "— デバイスを操作すると計測されます".into()
                             } else {
                                 let mut s = format!("ピーク · 平均 {:.0}", st.hz);
                                 if let Some((med, _)) = st.gap_stats {
-                                    s = format!("{s} · 推定周期 {med:.3}ms", );
+                                    s = format!("{s} · 推定周期 {med:.3}ms",);
                                 }
                                 s
                             })),

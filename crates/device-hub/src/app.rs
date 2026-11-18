@@ -403,9 +403,30 @@ pub struct Shell {
     /// 表示はこのフラグで信用できるかを出し分ける。
     pub(crate) last_window_active: bool,
     /// ポーリング 5 秒計測の終了時刻 (Some の間は計測中 — カーソル固定中)。
-    pub(crate) poll_meas_end: Option<std::time::Instant>,
+    pub(crate) poll_trial: Option<(std::time::Instant, DeviceId, u16, u16)>,
     /// 直近の 5 秒計測結果 (ピーク Hz, 間隔中央値 ms, カウント/秒)。
-    pub(crate) poll_meas_result: Option<(f32, f32, f32)>,
+    pub(crate) poll_meas_result: Option<(DeviceId, crate::rawinput::PollStats)>,
+    /// テスト画面の計測方式 (0 = OS 配信 Raw Input, 1 = USB 転送 USBPcap)。
+    pub(crate) meas_method: usize,
+    /// USB 計測の手入力対象。USB アドレスは接続ごとに変わるため prefs には残さない。
+    pub(crate) usb_target: devhub_polling::Target,
+    /// 実行中の USB 計測 — 開始したデバイスに紐付く
+    /// (選択デバイスを変えても結果が別の個体に移らないように)。
+    pub(crate) usb_cap: Option<(DeviceId, devhub_polling::Capture)>,
+    /// `usb_cap` の直近スナップショット (tick で ~264ms ごと更新)。
+    pub(crate) usb_snap: Option<devhub_polling::Snapshot>,
+    /// 直近の USB 計測結果 — (デバイス, 対象, 最終スナップショット)。
+    pub(crate) usb_result: Option<(DeviceId, devhub_polling::Target, devhub_polling::Snapshot)>,
+    /// `discover::devices()` の列挙結果 (None = まだ読んでいない — 初回表示で読む)。
+    pub(crate) usb_devs: Option<Vec<devhub_polling::UsbDevice>>,
+    /// EP 自動検出スキャンの完了待ちチャネル (hub, addr, 結果)。
+    #[allow(clippy::type_complexity)]
+    pub(crate) usb_scan:
+        Option<std::sync::mpsc::Receiver<(u16, u8, std::io::Result<Vec<(u8, u32)>>)>>,
+    /// EP スキャンの結果表示 (成功時の検出 EP、失敗理由)。
+    pub(crate) usb_scan_msg: Option<String>,
+    /// 対象デバイス一覧に HID 入力以外のデバイスも表示する (「その他」の開閉)。
+    pub(crate) usb_show_all: bool,
 }
 
 /// 構成切替が完了してから適用する状態 (別構成への undo/redo など)。
@@ -553,28 +574,19 @@ impl Shell {
                             }
                         }
                         // 5 秒計測の終了処理 — 結果を確定してカーソル固定を解除。
-                        if this
-                            .poll_meas_end
-                            .is_some_and(|end| std::time::Instant::now() >= end)
-                        {
-                            this.poll_meas_end = None;
+                        if let Some((_, id, vid, pid)) = this.poll_trial.take_if(|(end, ..)| {
+                            std::time::Instant::now() >= *end
+                        }) {
                             crate::cursor::unclip();
-                            if let Some(id) = this.device_id() {
-                                if let Some(st) =
-                                    this.hub.session(&id).and_then(|s| s.poll.clone())
-                                {
-                                    let peak = st
-                                        .segs
-                                        .iter()
-                                        .filter(|s| s.age_s <= 5.5)
-                                        .map(|s| s.rate_hz)
-                                        .chain(st.seg_hz)
-                                        .fold(0f32, f32::max);
-                                    let med = st.gap_stats.map(|(m, _)| m).unwrap_or(0.);
-                                    let cnt = st.counts_per_sec.unwrap_or(0.);
-                                    this.poll_meas_result = Some((peak, med, cnt));
-                                }
-                            }
+                            let stats = crate::rawinput::finish_trial(vid, pid).unwrap_or_default();
+                            this.poll_meas_result = Some((id, stats));
+                            cx.notify();
+                        }
+                        // USB 実測のスナップショット (~264ms) — エラー終端を拾って結果へ移す。
+                        if n.is_multiple_of(8)
+                            && (this.usb_cap.is_some() || this.usb_scan.is_some())
+                        {
+                            this.usb_tick();
                             cx.notify();
                         }
                         // プロセス監視 (~1s): フォアグラウンド遷移でプロファイル適用。
@@ -594,6 +606,13 @@ impl Shell {
         window.focus(&focus, cx);
 
         let route = Route::Home;
+        // USB アドレスは接続ごとに変わるので復元しない (ハブ番号・EP・Report ID は prefs)。
+        let usb_target = devhub_polling::Target {
+            hub: prefs.usb_hub.max(1),
+            device: 1,
+            endpoint: 0x80 | prefs.usb_ep.clamp(1, 15),
+            report: u8::try_from(prefs.usb_report).ok(),
+        };
         Self {
             hub,
             prefs,
@@ -653,10 +672,19 @@ impl Shell {
             hwnd: window_hwnd(window),
             #[cfg(windows)]
             mem_low: false,
+            meas_method: 0,
+            usb_target,
+            usb_cap: None,
+            usb_snap: None,
+            usb_result: None,
+            usb_devs: None,
+            usb_scan: None,
+            usb_scan_msg: None,
+            usb_show_all: false,
             #[cfg(windows)]
             mem_ticks: 0,
             last_window_active: true,
-            poll_meas_end: None,
+            poll_trial: None,
             poll_meas_result: None,
         }
     }
@@ -821,7 +849,7 @@ impl Shell {
                 if let Some(p) = self.prefs.profiles.get_mut(pi) {
                     if let Some(t) = p.devices.iter_mut().find(|t| t.device == id.0) {
                         match t.changes.last_mut() {
-                            Some(last) if last.same_target(&change) => *last = change.clone(),
+                            Some(last) if last.is_superseded_by(&change) => *last = change.clone(),
                             _ => t.changes.push(change.clone()),
                         }
                         self.prefs.save();
@@ -2036,4 +2064,140 @@ impl Shell {
 
     #[cfg(not(windows))]
     fn mem_tick(&mut self) {}
+
+    fn usb_resolve_target(&mut self) -> bool {
+        if self.prefs.usb_pick.is_empty() { return true; }
+        let Some(d) = devhub_polling::discover::resolve(&self.prefs.usb_pick, 0, 0) else {
+            self.usb_scan_msg = Some("対象が見つかりません。接続を確認して更新し、製品を選び直してください。".into());
+            return false;
+        };
+        self.usb_target.hub = d.hub;
+        self.usb_target.device = d.address;
+        self.usb_scan_msg = None;
+        true
+    }
+
+    /// USB 実測を開始する。`Capture` のブロッキング read は自前のワーカーで
+    /// 動くため UI スレッド・HID 書き込みワーカーは塞がない。
+    pub(crate) fn usb_start(&mut self) {
+        let Some(id) = self.device_id() else {
+            return;
+        };
+        self.usb_snap = None;
+        self.usb_result = None;
+        if !self.usb_resolve_target() { return; }
+        self.usb_cap = Some((id, devhub_polling::Capture::start(self.usb_target)));
+    }
+
+    /// USB 実測を止めて最終スナップショットを結果として残す。
+    pub(crate) fn usb_stop(&mut self) {
+        if let Some((id, cap)) = self.usb_cap.take() {
+            let target = cap.target;
+            let snap = cap.snapshot();
+            // cap はここで drop — ワーカーの read を解除して join (通常は数 ms)。
+            self.usb_result = Some((id, target, snap));
+            self.usb_snap = None;
+        }
+    }
+
+    /// USB 実測の定期更新 (~264ms)。エラー終端に達していたら畳んで結果へ移す。
+    pub(crate) fn usb_tick(&mut self) {
+        if let Some((_, cap)) = self.usb_cap.as_ref() {
+            let snap = cap.snapshot();
+            self.usb_snap = Some(snap);
+            if snap.status.is_error() {
+                if let Some((id, cap)) = self.usb_cap.take() {
+                    self.usb_result = Some((id, cap.target, snap));
+                }
+            }
+        }
+        // EP 自動検出スキャンの完了を拾う。
+        if let Some(rx) = &self.usb_scan {
+            match rx.try_recv() {
+                Ok((hub, dev, result)) => {
+                    self.usb_scan = None;
+                    self.usb_scan_msg = Some(match result {
+                        Ok(eps)
+                            if hub == self.usb_target.hub
+                                && dev == self.usb_target.device =>
+                        {
+                            match eps.first() {
+                                Some((ep, n)) => {
+                                    self.usb_target.endpoint = *ep;
+                                    self.prefs.usb_ep = ep & 0x7f;
+                                    self.prefs.save();
+                                    format!("EP 0x{ep:02X} を検出 ({n} 転送) — 計測を開始できます")
+                                }
+                                None => {
+                                    "転送なし — 対象デバイスを操作しながら再試行".to_string()
+                                }
+                            }
+                        }
+                        Ok(_) => "対象が変わったため検出結果を破棄しました".to_string(),
+                        Err(e) => match e.raw_os_error() {
+                            Some(5) => "EP 検出失敗 — 権限不足 (管理者として実行)".into(),
+                            Some(32) => "EP 検出失敗 — ハブが使用中".into(),
+                            Some(2 | 3) => "EP 検出失敗 — USBPcap ハブなし".into(),
+                            _ => format!("EP 検出失敗: {e}"),
+                        },
+                    });
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.usb_scan = None;
+                }
+            }
+        }
+    }
+
+    /// USB 対象候補を再列挙する (権限不要)。保存した個体選択があれば
+    /// 現在のハブ番号・アドレスへ再解決する (抜き差し・ポート変更に追従)。
+    pub(crate) fn usb_refresh(&mut self) {
+        let all = devhub_polling::discover::devices();
+        if !self.prefs.usb_pick.is_empty() {
+            if let Some(d) = all
+                .iter()
+                .find(|d| d.instance_id.eq_ignore_ascii_case(&self.prefs.usb_pick))
+            {
+                self.usb_target.hub = d.hub;
+                self.usb_target.device = d.address;
+            }
+        }
+        self.usb_devs = Some(all);
+    }
+
+    /// 列挙結果から対象を選ぶ — ハブ番号と現在の USB アドレスを反映する。
+    pub(crate) fn usb_pick_device(&mut self, i: usize) {
+        let Some(d) = self
+            .usb_devs
+            .as_ref()
+            .and_then(|v| v.get(i))
+            .filter(|d| d.hub != 0)
+            .cloned()
+        else {
+            return;
+        };
+        self.prefs.usb_pick = d.instance_id.clone();
+        self.prefs.usb_hub = d.hub;
+        self.prefs.save();
+        self.usb_target.hub = d.hub;
+        self.usb_target.device = d.address;
+        self.usb_scan_msg = None;
+    }
+
+    /// IN EP を 3 秒の短時間スキャンで自動検出する。対象のマウスを動かしながら使う。
+    /// 実行中は当該ハブを占有する (ハブの読み書き権限が要る)。
+    pub(crate) fn usb_detect_ep(&mut self) {
+        if self.usb_scan.is_some() || !self.usb_resolve_target() {
+            return;
+        }
+        let (hub, dev) = (self.usb_target.hub, self.usb_target.device);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let r = devhub_polling::scan_interrupt(hub, dev, std::time::Duration::from_secs(3));
+            let _ = tx.send((hub, dev, r));
+        });
+        self.usb_scan = Some(rx);
+        self.usb_scan_msg = None;
+    }
 }

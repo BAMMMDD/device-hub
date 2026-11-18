@@ -9,6 +9,8 @@ with a Liquid Glass design.
 
 **日本語版は下にあります → [日本語](#日本語)**
 
+[Windows 版のインストール・USB 計測・OBS 配信の使い方](docs/QUICKSTART_JA.md)
+
 ![Device HUB](docs/screenshot.png)
 
 ## Features
@@ -84,6 +86,7 @@ crates/devhub-core    contract: capabilities, device model, backend traits, regi
 crates/devhub-hid     Windows HID drivers (mouse.fit report-8/EEPROM, xsyd)
 crates/device-hub     GPUI frontend (Liquid Glass)
 crates/devhub-obs     OBS source plugin + CPU renderer
+crates/devhub-polling shared USBPcap polling-rate meter (app + OBS)
 crates/devhub-update  firmware update notifications
 vendor/               gpui-pre / gpui-pre-windows with GPU backdrop patch
 docs/                 protocol notes, frontend structure, OBS overlay, add-device guide

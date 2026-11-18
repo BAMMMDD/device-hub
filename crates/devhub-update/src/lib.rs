@@ -50,7 +50,7 @@ pub fn check(
         .as_secs();
     let agent = ureq::AgentBuilder::new().timeout(TIMEOUT).build();
     let mut st = match feed {
-        FirmwareFeed::MouseFit { ui_folder } => mousefit(&agent, ui_folder)?,
+        FirmwareFeed::MouseFit { ui_folder } => mousefit(&agent, ui_folder, last_fp)?,
         FirmwareFeed::Sparklink { vid, pid, board_id } => {
             sparklink(&agent, *vid, *pid, *board_id, current_fw)?
         }
@@ -89,7 +89,7 @@ fn is_new(fp: &str, last_fp: &str) -> bool {
 }
 
 /// mouse.fit: FWLINK.txt が指す zip の HTTP ヘッダを指紋にする。
-fn mousefit(agent: &ureq::Agent, ui_folder: &str) -> Result<UpdateStatus, UpdateError> {
+fn mousefit(agent: &ureq::Agent, ui_folder: &str, last_fp: &str) -> Result<UpdateStatus, UpdateError> {
     let feed_url = format!("{MOUSEFIT_BASE}/Config/{ui_folder}/FWLINK.txt");
     let body = agent
         .get(&feed_url)
@@ -115,15 +115,18 @@ fn mousefit(agent: &ureq::Agent, ui_folder: &str) -> Result<UpdateStatus, Update
     let etag = head.header("ETag").unwrap_or("");
     let lastmod = head.header("Last-Modified").unwrap_or("");
     let len = head.header("Content-Length").unwrap_or("");
+    if etag.is_empty() && lastmod.is_empty() && len.is_empty() {
+        return Err(UpdateError("zip HEAD: missing fingerprint headers".into()));
+    }
     let fingerprint = format!("{etag}|{lastmod}|{len}");
-    // バージョンらしき数字列をファイル名から拾う (…/3955/xxx_3955JM.zip → "3955")。
+    // 配布ファイル名を表示用に使う。更新判定は HEAD の指紋を比較する。
     let version = zip_url
         .rsplit('/')
         .next()
         .and_then(|f| f.strip_suffix(".zip"))
         .map(|f| f.to_string());
     Ok(UpdateStatus {
-        new_available: false,
+        new_available: is_new(&fingerprint, last_fp),
         version,
         url: Some("https://www.mouse.fit/".into()),
         fingerprint,

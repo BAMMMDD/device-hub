@@ -38,6 +38,28 @@ pub struct Prefs {
     /// プロセス監視ルール (フォアグラウンド連動でプロファイルを適用)。
     #[serde(default)]
     pub proc_rules: Vec<ProcRule>,
+    /// USB 実測 (USBPcap) の手入力対象: ハブ番号・IN EP 番号・Report ID (-1=全件)。
+    /// USB アドレスは接続ごとに変わるので保存しない。
+    #[serde(default = "default_usb_hub")]
+    pub usb_hub: u16,
+    #[serde(default = "default_usb_ep")]
+    pub usb_ep: u8,
+    #[serde(default = "default_usb_report")]
+    pub usb_report: i16,
+    /// USB 対象の製品選択: PnP インスタンス ID (`USB\VID_xxxx&PID_yyyy\<serial>`)。
+    /// 再接続・ポート変更でアドレスが変わってもこれで再解決する。
+    #[serde(default)]
+    pub usb_pick: String,
+}
+
+fn default_usb_hub() -> u16 {
+    1
+}
+fn default_usb_ep() -> u8 {
+    1
+}
+fn default_usb_report() -> i16 {
+    -1
 }
 
 /// 設定プロファイル — 録画した `Change` を順に再生して適用する。
@@ -140,6 +162,10 @@ impl Default for Prefs {
             livefx: Default::default(),
             profiles: vec![],
             proc_rules: vec![],
+            usb_hub: default_usb_hub(),
+            usb_ep: default_usb_ep(),
+            usb_report: default_usb_report(),
+            usb_pick: String::new(),
         }
     }
 }
@@ -165,10 +191,7 @@ impl Prefs {
             let _ = std::fs::create_dir_all(dir);
         }
         if let Ok(s) = serde_json::to_string_pretty(self) {
-            let tmp = p.with_extension("json.tmp");
-            if std::fs::write(&tmp, s).is_ok() {
-                let _ = std::fs::rename(&tmp, &p);
-            }
+            let _ = crate::atomic::write(&p, &s);
         }
     }
 

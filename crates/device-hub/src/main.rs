@@ -23,6 +23,17 @@ use gpui_kit::*;
 
 fn main() {
     device_hub::rawinput::start(); // 実測ポーリングレート計測 (Raw Input)
+    // USB 計測ワーカーの診断ログ — 未設定なら %TEMP% に既定で出す
+    // (切断の OS コード採取用。ワーカー遷移のみで容量は微小)。
+    if std::env::var_os("DEVHUB_USB_LOG").is_none() {
+        if let Some(tmp) = std::env::var_os("TEMP") {
+            let mut p = std::path::PathBuf::from(tmp);
+            p.push("devhub_usb_worker.log");
+            unsafe {
+                std::env::set_var("DEVHUB_USB_LOG", p);
+            }
+        }
+    }
     gpui_kit::application()
         .with_assets(gpui_kit::assets::AllAssets)
         .run(|cx| {

@@ -71,18 +71,29 @@ fn goertzel(buf: &[f32], sr: f32, freq: f32) -> f32 {
 
 #[cfg(windows)]
 unsafe fn run() {
-    use windows::Win32::Media::Audio::{
-        eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator,
-        MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
-        WAVEFORMATEXTENSIBLE,
-    };
-    use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED,
-    };
-
+    use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
     if CoInitializeEx(None, COINIT_MULTITHREADED).is_err() {
         return;
     }
+    // 出力デバイスの抜き差し・既定先の切替で一度死んでも復帰するよう、
+    // 取得とキャプチャを間隔を空けて取り直す。失敗中は無音にする。
+    loop {
+        capture_once();
+        put(&[0.; NBANDS]);
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+}
+
+/// 既定の出力先を開いてループバックを回す。エラー (デバイス喪失など) で戻る。
+#[cfg(windows)]
+unsafe fn capture_once() {
+    use windows::Win32::Media::Audio::{
+        eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator,
+        MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
+        AUDCLNT_STREAMFLAGS_LOOPBACK, WAVEFORMATEXTENSIBLE,
+    };
+    use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL};
+
     let en: IMMDeviceEnumerator = match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
         Ok(e) => e,
         Err(_) => return,
@@ -113,7 +124,7 @@ unsafe fn run() {
     };
     let ch = wfx.nChannels.max(1) as usize;
     let bpframe = wfx.nBlockAlign as usize;
-    if !is_float || bpframe == 0 {
+    if !is_float || wfx.wBitsPerSample != 32 || bpframe < ch * 4 {
         CoTaskMemFree(Some(fmt as *const _));
         return;
     }
@@ -141,9 +152,9 @@ unsafe fn run() {
     }
     let freqs = band_freqs();
     let mut acc: Vec<f32> = Vec::with_capacity(N * 2);
-    let mut smooth = vec![0f32; NBANDS];
+    let mut smooth = [0f32; NBANDS];
     // 各バンドの最近ピーク — 小さい音でも振り切る自動正規化。
-    let mut peaks = vec![0.05f32; NBANDS];
+    let mut peaks = [0.05f32; NBANDS];
     loop {
         std::thread::sleep(std::time::Duration::from_millis(10));
         let mut pkt = match cap.GetNextPacketSize() {
@@ -160,7 +171,9 @@ unsafe fn run() {
             {
                 return;
             }
-            if !data.is_null() && frames > 0 {
+            if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 {
+                acc.resize(acc.len() + frames as usize, 0.);
+            } else if !data.is_null() && frames > 0 {
                 let n = frames as usize * bpframe;
                 let raw = std::slice::from_raw_parts(data as *const u8, n);
                 for fr in raw.chunks_exact(bpframe) {

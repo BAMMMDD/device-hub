@@ -240,28 +240,81 @@ impl Poller {
     }
 }
 
-/// 全ソース共有のポーラー (3 ソース登録しても HID ポーリングは 1 本)。
-/// モジュール寿命と同じなので停止はしない。
-pub fn shared() -> &'static Mutex<Live> {
-    static S: std::sync::OnceLock<Arc<Mutex<Live>>> = std::sync::OnceLock::new();
-    S.get_or_init(|| {
-        let shared = Arc::new(Mutex::new(Live {
-            status: "起動中…".into(),
-            ..Live::default()
-        }));
-        let (s2, st2) = (shared.clone(), Arc::new(AtomicBool::new(false)));
-        let _ = std::thread::Builder::new()
-            .name("devhub-obs-poll".into())
-            .spawn(move || loop_body(&s2, &st2));
-        shared
-    })
-}
-
 impl Drop for Poller {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(j) = self.join.take() {
             let _ = j.join();
         }
+    }
+}
+
+/// 全ソース共有のポーラー (3 ソース登録しても HID ポーリングは 1 本)。
+/// 最後の保持者が落ちたらワーカーを止めて join する — ソースをすべて
+/// 削除したり DLL が unload されても HID 読み取りが走り続けない。
+struct Pool {
+    live: Arc<Mutex<Live>>,
+    stop: Arc<AtomicBool>,
+    join: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl Pool {
+    fn spawn() -> Arc<Self> {
+        let live = Arc::new(Mutex::new(Live {
+            status: "起動中…".into(),
+            ..Live::default()
+        }));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (s2, st2) = (live.clone(), stop.clone());
+        let join = std::thread::Builder::new()
+            .name("devhub-obs-poll".into())
+            .spawn(move || loop_body(&s2, &st2))
+            .ok();
+        Arc::new(Self {
+            live,
+            stop,
+            join: Mutex::new(join),
+        })
+    }
+}
+
+impl Drop for Pool {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(j) = self.join.lock().unwrap().take() {
+            let _ = j.join();
+        }
+    }
+}
+
+static POOL: Mutex<std::sync::Weak<Pool>> = Mutex::new(std::sync::Weak::new());
+
+/// 共有ポーラーの保持ハンドル。強参照がある限りワーカーは生きている。
+pub struct LiveRef(Arc<Pool>);
+
+impl LiveRef {
+    /// 描画側が読むスナップショット。
+    pub fn live(&self) -> &Mutex<Live> {
+        &self.0.live
+    }
+}
+
+/// 共有ポーラーを取得する — 既存プールがあれば参照を増やし、
+/// なければ起動する。`LiveRef` をすべて落とすとワーカーは止まる。
+pub fn shared() -> LiveRef {
+    let mut slot = POOL.lock().unwrap();
+    if let Some(p) = slot.upgrade() {
+        return LiveRef(p);
+    }
+    let p = Pool::spawn();
+    *slot = Arc::downgrade(&p);
+    LiveRef(p)
+}
+
+/// DLL unload 時の保険 — 走っているプールがあれば停止フラグだけ立てる
+/// (ソースをすべて畳んだ後なら通常は既に止まっている)。
+pub fn shutdown() {
+    if let Some(p) = POOL.lock().unwrap().upgrade() {
+        p.stop.store(true, Ordering::Relaxed);
     }
 }

@@ -8,6 +8,7 @@ Windows 用の個人 GPUI アプリ。デザインは Liquid Glass。
 ```
 crates/devhub-core   契約 v2 (model / backend トレイト) + keys + registry + デモバックエンド   ← UI と HID の境界
 crates/devhub-hid    実機ドライバ (HID)                                                       ← バックエンド担当
+crates/devhub-polling USBPcap 実測ポーリング計測器 (Target/Snapshot/Capture)                     ← アプリ・OBS 共通
 crates/device-hub    GPUI フロントエンド (Liquid Glass)                                         ← フロント担当
 vendor/              GPU backdrop を足した gpui-pre / gpui-pre-windows (GPU backdrop パッチ)
 docs/NEXT_TASKS.md      次にやること (v4)

@@ -1,0 +1,38 @@
+# Device HUB v0.3.0 の使い方（Windows x64）
+
+## ダウンロードと起動
+
+[GitHub Release](https://github.com/pity-zxcv/device-hub/releases/tag/v0.3.0) の Assets から用途に合う ZIP を取得してください。
+
+| 用途 | ZIP | 展開先 |
+|---|---|---|
+| アプリと OBS プラグイン | `device-hub-v0.3.0-windows-x64.zip` | 任意のフォルダー |
+| OBS プラグインだけ | `devhub-obs-v0.3.0-plugin.zip` | `%ProgramData%\obs-studio\plugins\devhub_obs\` |
+
+ダウンロードの確認には PowerShell で `Get-FileHash .\ファイル名.zip -Algorithm SHA256` を実行し、同じリリースの `SHA256SUMS.txt` と照合します。
+
+アプリは ZIP を展開して `device-hub.exe` を起動します。設定したい機器を USB ケーブルまたは対応ドングルで接続し、メーカーの設定サイトを閉じてからホームで機器を選びます。選択した製品に応じて DPI、ボタン割り当て、キーボード、EQ などの設定が表示されます。
+
+## ゲームを前面にしてマウスを計測する
+
+1. USB 転送を測る PC に [USBPcap ドライバ](https://desowin.org/usbpcap/) をインストールし、Windows を再起動します。Python、Wireshark、TShark は不要です。通常のデバイス設定だけなら USBPcap の導入は任意です。
+2. Device HUB を管理者として起動し、マウスの「テスト」で「USB 転送 (USBPcap)」を選びます。対象の製品名を選択します。無線マウスは USB ドングル名で表示されることがあります。
+3. 「EP 自動検出」を押し、3 秒間、対象のマウスだけを動かします。検出した EP 番号を控えると、OBS でも同じ対象を選べます。手入力では `0x81` は `1`、Report ID の `-1` は全件です。
+4. 計測を開始し、ゲームを前面にしてマウスを数秒間動かします。アプリに戻って停止すると、計測中の連続 1 秒間で最も多かった転送数を確認できます。
+
+現在値は対象 EP で成功したデータ付き interrupt IN 完了の直近 1 秒の件数です。静止時に送信を休むマウスは値が下がります。製品の設定 Hz や、データを返さなかったバス上の問い合わせ回数はこの値からは分かりません。Bluetooth 接続のマウスは対象外です。
+
+## OBS にリアルタイム表示する
+
+1. OBS を終了します。フル版なら展開した `devhub_obs` フォルダーを `%ProgramData%\obs-studio\plugins\` にコピーします。単体版なら上表の展開先を作り、その中に ZIP の中身を展開します。最終的な DLL の位置は `%ProgramData%\obs-studio\plugins\devhub_obs\bin\64bit\devhub_obs.dll` です。隣の `data\locale` も一緒に配置してください。
+2. アプリ側の USB 計測を停止し、64 ビット版 OBS Studio を管理者として起動します。配信中に Device HUB 本体を開いておく必要はありません。
+3. シーンの「ソース」→「＋」→「Device HUB USB ポーリングレート」を追加します。プロパティの「対象デバイス (製品名)」でマウスまたはドングルを選び、IN エンドポイント番号、Report ID を設定します。「USB 入力を計測」をオンにします。
+4. マウスを動かしてプレビューの Hz が変わることを確認し、表示を好きな位置へ移動します。他のシーンでも表示する場合は「既存を追加」で同じソースを使います。
+
+| 症状 | 確認すること |
+|---|---|
+| ソース一覧に出ない | DLL のフォルダーが二重になっていないか確認し、OBS を再起動します。 |
+| driver / hub not found | ドライバ導入後の再起動と、対象の USB 接続を確認します。 |
+| access denied / hub already in use | 計測するアプリを管理者として起動し、同じハブを計測している別のソース、アプリ、Wireshark を停止します。 |
+| Waiting for mouse input | 対象を動かします。変化がなければ製品、EP、Report ID を再確認します。 |
+| 抜き差し後に反応しない | 計測を止め、製品一覧を更新して対象を選び直します。OBS ではプロパティで選び直して計測を再開します。 |

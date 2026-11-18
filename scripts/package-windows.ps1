@@ -15,6 +15,10 @@ Copy-Item -LiteralPath (Join-Path $root 'target/release/device-hub.exe') -Destin
 Copy-Item -LiteralPath (Join-Path $root 'target/release/devhub_obs.dll') -Destination $bin
 Copy-Item -Path (Join-Path $root 'crates/devhub-obs/data/locale/*.ini') -Destination $locale
 
+foreach ($destination in $OutputDirectory, $plugin) {
+    Copy-Item -LiteralPath (Join-Path $root 'docs/QUICKSTART_JA.md') -Destination $destination
+}
+
 foreach ($name in 'LICENSE-MIT', 'LICENSE-APACHE', 'THIRD_PARTY_NOTICES.md') {
     $source = Join-Path $root $name
     Copy-Item -LiteralPath $source -Destination $OutputDirectory

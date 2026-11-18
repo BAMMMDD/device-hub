@@ -36,8 +36,12 @@ pub enum Msg {
         id: DeviceId,
         err: String,
     },
+    /// `gen` はその読み込みを発行した時点の `submit_seq` — これより
+    /// 後に投入した未確定の変更を確定状態へ重ねる。世代を応答に持たせる
+    /// ことで、別の読み込みに遅れて届いた古い応答でも正しく重ねられる。
     State {
         id: DeviceId,
+        gen: u64,
         state: Box<DeviceState>,
     },
     ReadFailed {
@@ -113,10 +117,12 @@ pub enum Msg {
 
 enum Job {
     Open,
-    Read,
+    /// 全設定の読み込み — `gen` は発行時の submit_seq (応答の世代に使う)。
+    Read { gen: u64 },
     Apply(Change),
     /// 構成 (オンボードプロファイル) 切替 — 切替後に全設定を読み直す。
-    Profile(u8),
+    /// `gen` は発行時の submit_seq (内部の読み直しの世代)。
+    Profile { profile: u8, gen: u64 },
     Action {
         id: String,
         label: String,
@@ -376,7 +382,12 @@ impl Hub {
             }
             s.switching_profile = true;
             s.switch_failed = false;
-            if s.tx.send(Job::Profile(p)).is_ok() {
+            if s.tx.send(Job::Profile {
+                profile: p,
+                gen: s.submit_seq,
+            })
+            .is_ok()
+            {
                 // 切替ジョブは内部で全読み直しする — ここまでの変更は読み直しに含まれる。
                 s.read_seq = s.submit_seq;
                 s.pending += 1;
@@ -708,13 +719,15 @@ impl Hub {
                 }
                 None
             }
-            Msg::State { id, state } => {
+            Msg::State { id, gen, state } => {
                 if let Some(s) = self.sessions.get_mut(&id) {
-                    // 読み込みの発行より後に投入した未確定の変更を重ねる — 古い
+                    // この読み込みの発行より後に投入した未確定の変更を重ねる — 古い
                     // 読み出しで楽観的な変更を巻き戻さない (それらはまだ実行中)。
+                    // `gen` は応答側が持つ世代なので、後続の読み込み発行より
+                    // 先に届いた遅延応答でも正しく重ねられる。
                     let mut st = *state;
                     for (seq, c) in &s.pending_changes {
-                        if *seq > s.read_seq {
+                        if *seq > gen {
                             apply_local(&mut st, c);
                         }
                     }
@@ -965,7 +978,9 @@ impl Hub {
 /// 未確定の変更は `Msg::State` 着信時に確定状態へ重ねる (巻き戻さない)。
 fn send_read(s: &mut Session) {
     s.read_seq = s.submit_seq;
-    let _ = s.tx.send(Job::Read);
+    let _ = s.tx.send(Job::Read {
+        gen: s.read_seq,
+    });
 }
 
 fn send_open(s: &mut Session) {
@@ -980,10 +995,7 @@ fn coalesce_jobs(jobs: impl IntoIterator<Item = Job>) -> (Vec<Job>, usize) {
     let mut skipped_applies = 0;
     for job in jobs {
         let replace = match (kept.last(), &job) {
-            (Some(Job::Apply(prev)), Job::Apply(next))
-                if !matches!((prev, next), (Change::PeqAll { .. }, Change::Peq { .. }))
-                    && prev.same_target(next) =>
-            {
+            (Some(Job::Apply(prev)), Job::Apply(next)) if prev.is_superseded_by(next) => {
                 skipped_applies += 1;
                 true
             }
@@ -1055,9 +1067,10 @@ fn worker(
                         err: e.to_string(),
                     }),
                 },
-                Job::Read => match driver.as_ref().map(|d| d.read()) {
+                Job::Read { gen } => match driver.as_ref().map(|d| d.read()) {
                     Some(Ok(st)) => send(Msg::State {
                         id: id.clone(),
+                        gen,
                         state: Box::new(st),
                     }),
                     Some(Err(e)) => {
@@ -1093,13 +1106,14 @@ fn worker(
                     })
                 }
                 // 構成切替: 書き込みに成功したら全設定を読み直してから報告する。
-                Job::Profile(p) => {
+                Job::Profile { profile: p, gen } => {
                     let (err, dead) = match &driver {
                         Some(d) => match d.apply(&Change::Profile(p)) {
                             Ok(()) => match d.read() {
                                 Ok(st) => {
                                     send(Msg::State {
                                         id: id.clone(),
+                                        gen,
                                         state: Box::new(st),
                                     });
                                     (None, false)
@@ -1629,7 +1643,7 @@ mod worker_queue_tests {
         let (jobs, skipped) = coalesce_jobs([
             stage(0),
             stage(1),
-            Job::Read,
+            Job::Read { gen: 0 },
             stage(2),
             Job::Apply(Change::Profile(1)),
             stage(3),
@@ -1639,7 +1653,7 @@ mod worker_queue_tests {
             jobs.as_slice(),
             [
                 Job::Apply(Change::ActiveStage(1)),
-                Job::Read,
+                Job::Read { gen: 0 },
                 Job::Apply(Change::ActiveStage(2)),
                 Job::Apply(Change::Profile(1)),
                 Job::Apply(Change::ActiveStage(3)),
@@ -1663,13 +1677,13 @@ mod worker_queue_tests {
     fn profile_switch_job_is_never_coalesced_into_writes() {
         // 構成切替は専用ジョブ — 直前・直後の書き込みと間引きで混ざらない。
         let stage = |i| Job::Apply(Change::ActiveStage(i));
-        let (jobs, skipped) = coalesce_jobs([stage(0), Job::Profile(2), stage(1)]);
+        let (jobs, skipped) = coalesce_jobs([stage(0), Job::Profile { profile: 2, gen: 0 }, stage(1)]);
         assert_eq!(skipped, 0);
         assert!(matches!(
             jobs.as_slice(),
             [
                 Job::Apply(Change::ActiveStage(0)),
-                Job::Profile(2),
+                Job::Profile { profile: 2, gen: 0 },
                 Job::Apply(Change::ActiveStage(1)),
             ]
         ));
@@ -1869,9 +1883,11 @@ mod worker_queue_tests {
                 name: "RENAMED".into(),
             },
         );
-        // 古い読み出しが届いても、確定待ちの変更は維持される。
+        // 古い読み出しが届いても、確定待ちの変更は維持される
+        // (gen=0 は変更の投入より前に発行された読み込みの応答)。
         hub.handle(Msg::State {
             id: id.clone(),
+            gen: 0,
             state: Box::new(stale),
         });
         assert_eq!(
@@ -1888,6 +1904,83 @@ mod worker_queue_tests {
         drain_until(&mut hub, &mut rx, Duration::from_secs(5), |h| {
             h.session(&id).is_some_and(|s| s.pending_changes.is_empty())
         });
+    }
+
+    #[test]
+    fn late_read_response_after_newer_read_keeps_edit() {
+        // 読込 A → 編集 → 読込 B の順に発行したあと、A の遅い応答が届いても
+        // 編集済み表示を巻き戻さない (世代は応答が持つため、B の発行で
+        // 進んだ read_seq に左右されない)。
+        let backend: Arc<dyn HubBackend> = Arc::new(devhub_core::demo::DemoHub::new());
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<Msg>();
+        let mut hub = Hub::new(backend, tx);
+        hub.scan();
+        let mut kb = None;
+        let t = std::time::Instant::now();
+        while kb.is_none() && t.elapsed() < Duration::from_secs(3) {
+            if let Ok(m) = rx.try_recv() {
+                if let Msg::Scanned { res: Ok(ds), .. } = &m {
+                    kb = ds
+                        .iter()
+                        .find(|d| d.kind == DeviceKind::Keyboard)
+                        .map(|d| d.id.clone());
+                }
+                hub.handle(m);
+            } else {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        let id = kb.expect("demo keyboard");
+        hub.open(&id, false);
+        assert!(drain_until(
+            &mut hub,
+            &mut rx,
+            Duration::from_secs(5),
+            |h| h.session(&id).is_some_and(|s| s.ready())
+        ));
+
+        // 読込 A を発行 (gen=0) → 変更を投入 → 読込 B を発行 (gen=1)。
+        hub.reload(&id);
+        let stale = hub.backend.driver(&id).unwrap().read().unwrap();
+        hub.apply(
+            &id,
+            Change::ProfileName {
+                index: 0,
+                name: "RENAMED".into(),
+            },
+        );
+        hub.reload(&id);
+
+        // A の遅い応答 (gen=0) が届く — 変更は確定待ちなので重ねて維持。
+        hub.handle(Msg::State {
+            id: id.clone(),
+            gen: 0,
+            state: Box::new(stale),
+        });
+        assert_eq!(
+            hub.session(&id)
+                .unwrap()
+                .state
+                .as_ref()
+                .unwrap()
+                .profile
+                .names[0],
+            "RENAMED",
+            "古い読み込み応答で確定待ちの編集が巻き戻った"
+        );
+        drain_until(&mut hub, &mut rx, Duration::from_secs(5), |h| {
+            h.session(&id).is_some_and(|s| s.pending_changes.is_empty())
+        });
+        assert_eq!(
+            hub.session(&id)
+                .unwrap()
+                .state
+                .as_ref()
+                .unwrap()
+                .profile
+                .names[0],
+            "RENAMED"
+        );
     }
 
     #[test]

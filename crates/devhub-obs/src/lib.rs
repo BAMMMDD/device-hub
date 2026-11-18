@@ -10,6 +10,7 @@ mod ffi;
 pub mod live;
 pub mod rawinput;
 pub mod render;
+mod usb_rate;
 
 use core::ffi::c_void;
 use std::collections::HashSet;
@@ -39,6 +40,11 @@ fn cs(s: &str) -> CString {
 
 struct Src {
     mode: render::Mode,
+    usb_missing: std::sync::atomic::AtomicBool,
+    usb: Mutex<Option<usb_rate::Capture>>,
+    usb_label: String,
+    /// 直近スナップショットの状態 — エラーへの遷移を診断ログに 1 度だけ残す。
+    usb_status: Option<usb_rate::Status>,
     font: Option<fontdue::Font>,
     pix: Option<render::Pix>,
     tex: *mut c_void,
@@ -58,12 +64,19 @@ struct Src {
     sm_route: Vec<f32>,
     sm_depth: Vec<f32>,
     last_tick: std::time::Instant,
+    /// 共有ポーラーの保持ハンドル — ドロップで参照数が減り、
+    /// 0 になると HID ワーカーが止まる。USB ソースは持たない。
+    pool: Option<live::LiveRef>,
 }
 
 impl Src {
     fn new(mode: render::Mode) -> Self {
         Self {
             mode,
+            usb: Mutex::default(),
+            usb_missing: Default::default(),
+            usb_label: String::new(),
+            usb_status: None,
             font: render::font(),
             pix: None,
             tex: core::ptr::null_mut(),
@@ -76,7 +89,23 @@ impl Src {
             sm_route: Vec::new(),
             sm_depth: Vec::new(),
             last_tick: std::time::Instant::now(),
+            pool: None,
         }
+    }
+
+    /// ライブソース用 — 共有ポーラーを保持して起こす (初回起動 or 再利用)。
+    fn new_live(mode: render::Mode) -> Self {
+        let mut s = Self::new(mode);
+        s.pool = Some(live::shared());
+        s
+    }
+
+    /// ポーラーの最新スナップショット (保持していなければ既定値)。
+    fn live_snap(&self) -> live::Live {
+        self.pool
+            .as_ref()
+            .and_then(|p| p.live().lock().map(|l| l.clone()).ok())
+            .unwrap_or_default()
     }
 
     /// 補間値をターゲットへ近づける。まだ動いている (再描画が要る) なら true。
@@ -163,15 +192,15 @@ unsafe extern "C" fn name_mouse(_d: *mut c_void) -> *const u8 {
 
 unsafe extern "C" fn create_both(_s: *mut c_void, _src: *mut c_void) -> *mut c_void {
     logline("create (both)");
-    Box::into_raw(Box::new(Src::new(render::Mode::Both))) as *mut c_void
+    Box::into_raw(Box::new(Src::new_live(render::Mode::Both))) as *mut c_void
 }
 unsafe extern "C" fn create_kb(_s: *mut c_void, _src: *mut c_void) -> *mut c_void {
     logline("create (kb)");
-    Box::into_raw(Box::new(Src::new(render::Mode::Kb))) as *mut c_void
+    Box::into_raw(Box::new(Src::new_live(render::Mode::Kb))) as *mut c_void
 }
 unsafe extern "C" fn create_mouse(_s: *mut c_void, _src: *mut c_void) -> *mut c_void {
     logline("create (mouse)");
-    Box::into_raw(Box::new(Src::new(render::Mode::Mouse))) as *mut c_void
+    Box::into_raw(Box::new(Src::new_live(render::Mode::Mouse))) as *mut c_void
 }
 
 unsafe extern "C" fn destroy(d: *mut c_void) {
@@ -242,16 +271,9 @@ unsafe fn cstr_text(p: *const u8, max: usize) -> String {
 /// この式の評価中は生きており、OBS は desc をコピーして持つので安全。
 /// (get_name/description に渡す fallback は 'static の CStr に限る)
 unsafe fn lt(key: &std::ffi::CStr, fallback: &std::ffi::CStr) -> *const u8 {
-    let m = MODULE.load(std::sync::atomic::Ordering::Relaxed);
-    if let (Some(api), false) = (ffi::resolve(), m.is_null()) {
-        if let Some(loc) = api.module_locale {
-            let p = loc(m, key.as_ptr() as *const u8);
-            if !p.is_null() {
-                return p;
-            }
-        }
-    }
-    fallback.as_ptr() as *const u8
+    let mut out = fallback.as_ptr().cast();
+    obs_module_get_string(key.as_ptr().cast(), &mut out);
+    out
 }
 
 /// OBS の色データ (int、下位から R,G,B,A の 8bit) を pack/unpack。
@@ -411,7 +433,7 @@ unsafe extern "C" fn get_properties(d: *mut c_void) -> *mut c_void {
         return core::ptr::null_mut();
     };
     let s = &mut *(d as *mut Src);
-    let snap = live::shared().lock().map(|l| l.clone()).unwrap_or_default();
+    let snap = s.live_snap();
     let props = (api.props_create)();
     // 説明文は OBS ロケールから (未翻訳は英語フォールバック)。ポインタは
     // OBS 所有か static なので lt() の結果をそのまま渡せる。
@@ -643,12 +665,17 @@ unsafe extern "C" fn video_render(d: *mut c_void, _e: *mut c_void) {
         return;
     };
     let s = &mut *(d as *mut Src);
+    update_live_pixels(s, api);
+    draw_texture(s, api);
+}
+
+unsafe fn update_live_pixels(s: &mut Src, api: &ffi::Api) {
     // 新しいデータ世代があれば補間のターゲットとして保持する。
     let (cfg, cfg_gen) = config::current();
     let cfg_changed = cfg_gen != s.last_cfg;
     let new_data = {
-        match live::shared().lock() {
-            Ok(l) => {
+        match s.pool.as_ref().map(|p| p.live().lock()) {
+            Some(Ok(l)) => {
                 if l.seq != s.last_seq {
                     s.live = l.clone();
                     s.last_seq = l.seq;
@@ -657,7 +684,7 @@ unsafe extern "C" fn video_render(d: *mut c_void, _e: *mut c_void) {
                     false
                 }
             }
-            Err(_) => {
+            Some(Err(_)) | None => {
                 s.last_seq = u64::MAX;
                 false
             }
@@ -685,6 +712,9 @@ unsafe extern "C" fn video_render(d: *mut c_void, _e: *mut c_void) {
         s.last_cfg = cfg_gen;
         s.dirty = true;
     }
+}
+
+unsafe fn draw_texture(s: &mut Src, api: &ffi::Api) {
     let Some(pix) = &s.pix else {
         s.first_render.get_or_insert_with(|| {
             logline("video_render: pix empty");
@@ -771,6 +801,184 @@ unsafe extern "C" fn video_render(d: *mut c_void, _e: *mut c_void) {
     (api.blend_pop)();
 }
 
+unsafe extern "C" fn usb_name(_: *mut c_void) -> *const u8 {
+    lt(c"devhub.usb.source", c"Device HUB USB Polling Rate")
+}
+
+unsafe extern "C" fn usb_create(settings: *mut c_void, _: *mut c_void) -> *mut c_void {
+    let d = Box::into_raw(Box::new(Src::new(render::Mode::Mouse))).cast();
+    usb_update(d, settings);
+    d
+}
+
+unsafe extern "C" fn usb_update(d: *mut c_void, settings: *mut c_void) {
+    let Some(api) = ffi::resolve() else { return };
+    let get = |n: &std::ffi::CStr| (api.data_get_int)(settings, n.as_ptr().cast());
+    let source = &*d.cast::<Src>();
+    let mut capture = source.usb.lock().unwrap_or_else(|e| e.into_inner());
+    use std::sync::atomic::Ordering;
+    source.usb_missing.store(false, Ordering::Relaxed);
+    if !(api.data_get_bool)(settings, c"capture".as_ptr().cast()) {
+        capture.take();
+        return;
+    }
+    let report = get(c"report");
+    let mut hub = get(c"hub").clamp(1, 255) as u16;
+    let mut device = get(c"device").clamp(1, 127) as u8;
+    // 「対象デバイス」リストで選んだ製品があれば、その現在のハブ番号・
+    // USB アドレスで上書きする (抜き差し・ポート変更にも追従する)。
+    // 未接続なら再選択を待つ。
+    let pick = {
+        let s = (api.data_get_string)(settings, c"pick".as_ptr().cast());
+        if s.is_null() {
+            String::new()
+        } else {
+            unsafe { std::ffi::CStr::from_ptr(s.cast()) }
+                .to_string_lossy()
+                .into_owned()
+        }
+    };
+    if !pick.is_empty() {
+        if let Some(d) = devhub_polling::discover::devices()
+            .into_iter()
+            .find(|d| d.hub != 0 && d.instance_id.eq_ignore_ascii_case(&pick))
+        {
+            hub = d.hub;
+            device = d.address;
+        } else {
+            capture.take();
+            source.usb_missing.store(true, Ordering::Relaxed);
+            return;
+        }
+    }
+    let target = usb_rate::Target {
+        hub,
+        device,
+        endpoint: 0x80 | get(c"endpoint").clamp(1, 15) as u8,
+        report: u8::try_from(report).ok(),
+    };
+    // 終端エラーのキャプチャはプロパティ適用を契機に作り直す (ハブが空いた
+    // あとユーザーが再適用すれば復帰する)。生きている同一対象は維持する。
+    let dead = capture
+        .as_ref()
+        .is_some_and(|c| c.snapshot().status.is_error());
+    if dead || capture.as_ref().is_none_or(|c| c.target != target) {
+        capture.take(); // Release the exclusive hub handle before reopening it.
+        *capture = Some(usb_rate::Capture::start(target));
+    }
+}
+
+unsafe extern "C" fn usb_defaults(settings: *mut c_void) {
+    let Some(api) = ffi::resolve() else { return };
+    for (n, value) in [(c"hub", 1), (c"device", 1), (c"endpoint", 1), (c"report", -1)] {
+        (api.data_set_default_int)(settings, n.as_ptr().cast(), value);
+    }
+    (api.data_set_default_bool)(settings, c"capture".as_ptr().cast(), false);
+}
+
+unsafe extern "C" fn usb_props(_: *mut c_void) -> *mut c_void {
+    let Some(api) = ffi::resolve() else { return std::ptr::null_mut() };
+    let p = (api.props_create)();
+    // 対象デバイスを製品名で選ぶリスト — 値は PnP インスタンス ID。
+    // 未選択 ("") なら下の手入力値を使う。マウス持ちを先頭に並べる。
+    let list = (api.props_add_list)(
+        p,
+        c"pick".as_ptr().cast(),
+        lt(c"devhub.usb.pick", c"Target device (product)"),
+        ffi::OBS_COMBO_LIST,
+        ffi::OBS_COMBO_FMT_STR,
+    );
+    (api.prop_list_add_str)(
+        list,
+        lt(c"devhub.usb.pick.none", c"(manual hub/address below)"),
+        c"".as_ptr().cast(),
+    );
+    let mut devs = devhub_polling::discover::devices();
+    devs.retain(|d| d.hub != 0);
+    devs.sort_by_key(|d| !d.is_mouse);
+    for d in &devs {
+        let label = format!(
+            "{} ({:04x}:{:04x}) USBPcap{} — {}",
+            d.name, d.vid, d.pid, d.hub, d.location
+        );
+        (api.prop_list_add_str)(
+            list,
+            cs(&label).as_ptr().cast(),
+            cs(&d.instance_id).as_ptr().cast(),
+        );
+    }
+    for (n, key, label, min, max) in [
+        (c"hub", c"devhub.usb.hub", c"USBPcap hub number", 1, 255),
+        (c"device", c"devhub.usb.device", c"USB device address", 1, 127),
+        (c"endpoint", c"devhub.usb.ep", c"Mouse IN endpoint number (0x81 = 1)", 1, 15),
+        (c"report", c"devhub.usb.report", c"Report ID (-1 = all)", -1, 255),
+    ] {
+        (api.props_add_int)(p, n.as_ptr().cast(), lt(key, label), min, max, 1);
+    }
+    (api.props_add_bool)(p, c"capture".as_ptr().cast(), lt(c"devhub.usb.capture", c"Measure USB input"));
+    p
+}
+
+unsafe extern "C" fn usb_width(_: *mut c_void) -> u32 { render::RATE_WIDTH }
+unsafe extern "C" fn usb_height(_: *mut c_void) -> u32 { render::RATE_HEIGHT }
+
+unsafe extern "C" fn usb_render(d: *mut c_void, _: *mut c_void) {
+    let Some(api) = ffi::resolve() else { return };
+    let s = &mut *d.cast::<Src>();
+    if s.pix.is_none() || s.last_tick.elapsed() >= std::time::Duration::from_millis(250) {
+        s.last_tick = std::time::Instant::now();
+        let cap = s.usb.lock().unwrap_or_else(|e| e.into_inner());
+        let (label, status) = cap.as_ref().map_or_else(
+            || (if s.usb_missing.load(std::sync::atomic::Ordering::Relaxed) { "USB device unavailable" } else { "USB capture off" }.to_string(), None),
+            |c| {
+                let snap = c.snapshot();
+                (usb_rate::label(&snap), Some(snap.status))
+            },
+        );
+        // エラー状態への遷移は診断ログに残す (同じ状態の繰り返しは書かない)。
+        if status.is_some_and(|st| st.is_error()) && s.usb_status != status {
+            logline(&format!(
+                "USBPcap{}: {label} ({:?})",
+                cap.as_ref().map_or(0, |c| c.target.hub),
+                status.unwrap()
+            ));
+        }
+        s.usb_status = status;
+        if label != s.usb_label {
+            s.pix = Some(render::usb_rate_label(&label));
+            s.usb_label = label;
+            s.dirty = true;
+        }
+    }
+    draw_texture(s, api);
+}
+
+unsafe extern "C" fn usb_destroy(d: *mut c_void) {
+    let mut s = Box::from_raw(d.cast::<Src>());
+    if let Some(api) = ffi::resolve() {
+        if !s.tex.is_null() {
+            (api.enter_graphics)();
+            (api.tex_destroy)(s.tex);
+            (api.leave_graphics)();
+            s.tex = std::ptr::null_mut();
+        }
+    }
+}
+
+fn usb_source_info() -> ffi::ObsSourceInfo {
+    ffi::ObsSourceInfo {
+        destroy: Some(usb_destroy),
+        get_width: Some(usb_width),
+        get_height: Some(usb_height),
+        get_defaults: Some(usb_defaults),
+        get_properties: Some(usb_props),
+        update: Some(usb_update),
+        video_render: Some(usb_render),
+        deactivate: None,
+        ..source_info(c"devhub_usb_rate", usb_name, usb_create)
+    }
+}
+
 /// `obs_register_source_s` は構造体をコピーするのでローカル生成でよい
 /// (生ポインタを含むので static にはできない)。
 fn source_info(
@@ -811,6 +1019,31 @@ pub extern "C" fn obs_current_module() -> *mut c_void {
     MODULE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+static LOOKUP: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+#[no_mangle]
+pub unsafe extern "C" fn obs_module_get_string(key: *const u8, out: *mut *const u8) -> bool {
+    let lookup = LOOKUP.load(std::sync::atomic::Ordering::Acquire);
+    !lookup.is_null() && ffi::resolve().is_some_and(|api| (api.lookup_string)(lookup, key, out))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn obs_module_set_locale(locale: *const u8) {
+    if let Some(api) = ffi::resolve() {
+        let next = (api.load_locale)(obs_current_module(), c"en-US".as_ptr().cast(), locale);
+        let old = LOOKUP.swap(next, std::sync::atomic::Ordering::AcqRel);
+        if !old.is_null() { (api.free_lookup)(old); }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn obs_module_free_locale() {
+    let old = LOOKUP.swap(std::ptr::null_mut(), std::sync::atomic::Ordering::AcqRel);
+    if let Some(api) = ffi::resolve() {
+        if !old.is_null() { (api.free_lookup)(old); }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn obs_module_ver() -> u32 {
     match ffi::resolve() {
@@ -845,6 +1078,7 @@ pub extern "C" fn obs_module_load() -> bool {
         return false;
     };
     let infos = [
+        usb_source_info(),
         source_info(c"devhub_live", name_both, create_both),
         source_info(c"devhub_live_kb", name_kb, create_kb),
         source_info(c"devhub_live_mouse", name_mouse, create_mouse),
@@ -858,4 +1092,7 @@ pub extern "C" fn obs_module_load() -> bool {
 }
 
 #[no_mangle]
-pub extern "C" fn obs_module_unload() {}
+pub extern "C" fn obs_module_unload() {
+    // 共有ポーラーが残っていれば止める (全ソース破棄後なら通常は既に停止済み)。
+    live::shutdown();
+}

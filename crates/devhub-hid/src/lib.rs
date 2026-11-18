@@ -38,6 +38,7 @@ pub fn connect() -> HubResult<Arc<dyn HubBackend>> {
         api: Mutex::new(api),
         paths: Mutex::new(HashMap::new()),
         drivers: Mutex::new(HashMap::new()),
+        creating: Mutex::new(HashMap::new()),
         names: Mutex::new(HashMap::new()),
         watcher: Mutex::new(None),
         detected: Arc::new(Mutex::new(HashMap::new())),
@@ -62,6 +63,9 @@ pub struct RealHub {
     paths: Mutex<HashMap<String, CString>>,
     /// `DeviceId.0` → ドライバ (オープン済みは使い回す)。
     drivers: Mutex<HashMap<String, Arc<dyn DeviceDriver>>>,
+    /// `DeviceId.0` → 生成ロック。同じ ID のドライバ生成を直列化する
+    /// (キャッシュ確認と登録が別区間だと並行呼び出しが同じ HID を二重に開く)。
+    creating: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// `DeviceId.0` → HID が報告する製品名 (scan 時点で記録)。
     names: Mutex<HashMap<String, String>>,
     /// `DeviceId.0` → ドングル内側機種の確定値 (model, 表示名)。
@@ -159,20 +163,79 @@ impl HubBackend for RealHub {
         {
             return Ok(d.clone());
         }
-        let path = self
-            .paths
+        // 同じ ID の生成を直列化する。別 ID の通信はこのロックを待たない。
+        let guard = self
+            .creating
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(id.0.clone())
+            .or_default()
+            .clone();
+        let _guard = guard.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(d) = self
+            .drivers
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .get(&id.0)
-            .cloned()
-            .ok_or_else(|| HubError::NotFound(id.clone()))?;
+        {
+            return Ok(d.clone());
+        }
         let (vid, pid) = parse_id(id).ok_or_else(|| HubError::NotFound(id.clone()))?;
         let spec = known_spec(vid, pid).ok_or_else(|| HubError::NotFound(id.clone()))?;
-        let api = self.api.lock().unwrap_or_else(|p| p.into_inner());
-        let dev = api
-            .open_path(&path)
-            .map_err(|e| HubError::Io(format!("open {}: {e}", spec.name)))?;
-        drop(api);
+        // 列挙の更新と生成が重なると、切れた古いパスで開いたドライバを
+        // 登録してしまう — 登録前にパス世代を再確認し、変わっていればやり直す。
+        for _ in 0..3 {
+            let path = self
+                .paths
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(&id.0)
+                .cloned()
+                .ok_or_else(|| HubError::NotFound(id.clone()))?;
+            let api = self.api.lock().unwrap_or_else(|p| p.into_inner());
+            let dev = match api.open_path(&path) {
+                Ok(d) => d,
+                Err(e) => return Err(HubError::Io(format!("open {}: {e}", spec.name))),
+            };
+            drop(api);
+            let drv = self.make_driver(spec, dev, id)?;
+            let same = self
+                .paths
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(&id.0)
+                == Some(&path);
+            if same {
+                self.drivers
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(id.0.clone(), drv.clone());
+                return Ok(drv);
+            }
+            // パスが更新された — 古い接続先で開いたハンドルは捨てて取り直す。
+        }
+        Err(HubError::Io(
+            "デバイスの接続先が変化しています — 再試行してください".into(),
+        ))
+    }
+
+    fn invalidate(&self, id: &DeviceId) {
+        self.drivers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&id.0);
+    }
+}
+
+impl RealHub {
+    /// ドライバ 1 回分の生成 (info/detected/events 解決 + registry 分岐)。
+    /// 登録は呼び出し側がパス世代の再確認後に行う。
+    fn make_driver(
+        &self,
+        spec: &registry::KnownDevice,
+        dev: hidapi::HidDevice,
+        id: &DeviceId,
+    ) -> HubResult<Arc<dyn DeviceDriver>> {
         let name = self
             .names
             .lock()
@@ -228,18 +291,7 @@ impl HubBackend for RealHub {
                 return Err(HubError::NotImplemented("このデバイスのドライバ"))
             }
         };
-        self.drivers
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(id.0.clone(), drv.clone());
         Ok(drv)
-    }
-
-    fn invalidate(&self, id: &DeviceId) {
-        self.drivers
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&id.0);
     }
 }
 

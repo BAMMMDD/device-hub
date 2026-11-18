@@ -13,16 +13,51 @@
 //!
 //! 「ポーリング実測」の値の意味 (docs/POLLING_RATE.md):
 //! - マウスは「動きがあるときだけ」レポートを送るので、届く数 ≦ カウント/秒。
-//! - 区間 (gap ≤ 2ms が続く区間) ごとにレートを出し、止まっている時間を除外する。
+//! - 区間 (gap ≤ 12ms が続く区間) ごとにレートを出し、止まっている時間を除外する。
 //! - RAWMOUSE の |dx|+|dy| を集計して「この速度・DPI での理論上限 ≒ カウント/秒」を出す。
 //!
-//! 注意: Windows 11 (Moment 3 / KB5022497 以降) は**バックグラウンドプロセスへの
-//! raw input 配信を制限**する。背面では ~150Hz 程度まで落ちた値しか取れないため、
-//! 計測値が信用できるのは自プロセスの窓が前面のときだけ (MouseTester と同じ制約)。
-//! UI は `last_window_active` で出し分けている。
+//! Windows 11 は背面のマウス入力をまとめて配信する。集計できるのは OS から
+//! 届いたイベント数。USB 転送側との比較は docs/POLLING_RATE.md を参照。
+
+/// `stats` の区間 1 件の公開形。
+#[derive(Clone, Copy, Debug)]
+pub struct SegInfo {
+    /// 区間内のレポート/秒。
+    pub rate_hz: f32,
+    /// 区間の時間幅 (ms)。
+    pub span_ms: u64,
+    /// 区間終了からの経過秒 (stats 呼び出し時点)。
+    pub age_s: f32,
+}
+
+/// 計測スナップショット — `stats` が 1 回のロックでまとめて返す。
+#[derive(Clone, Debug, Default)]
+pub struct PollStats {
+    /// 直近 1 秒のイベント数/秒 (止まっている時間も分母に入る下限値)。
+    pub hz: f32,
+    /// 250ms バケットのレート履歴 (古い→新しい、~15 秒)。
+    pub hist: Vec<f32>,
+    /// 直近イベントの最小間隔 (ms)。
+    pub min_gap_ms: Option<f32>,
+    /// 直近イベント間隔の (中央値, p95) [ms] — OS からの配信間隔。
+    pub gap_stats: Option<(f32, f32)>,
+    /// 直近の「動いている区間」のレート (進行中 ≥60ms or 直近確定 ≤1.5s)。
+    pub seg_hz: Option<f32>,
+    /// `seg_hz` の区間幅 (ms)。
+    pub seg_span_ms: Option<u64>,
+    /// 直近 10 秒に終わった区間の最大レート (「ピーク」)。
+    pub peak_hz: Option<f32>,
+    /// 直近区間の移動量合計/秒 (|dx|+|dy|) — この速度・DPI での理論上限 ≒ これ。
+    pub counts_per_sec: Option<f32>,
+    /// 直近区間で |d|≤1 のレポートの割合 — 高いほど DPI/速度が足りない。
+    pub low_frac: Option<f32>,
+    /// 確定区間 (新しい順、最大 128) — 5 秒計測等の窓切りに使う。
+    pub segs: Vec<SegInfo>,
+}
 
 #[cfg(windows)]
 mod imp {
+    use super::{PollStats, SegInfo};
     use std::cell::RefCell;
     use std::collections::{HashMap, VecDeque};
     use std::mem::size_of;
@@ -34,7 +69,7 @@ mod imp {
     use windows_sys::Win32::UI::Input::{
         GetRawInputBuffer, GetRawInputData, GetRawInputDeviceInfoW, RegisterRawInputDevices,
         HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RIDEV_INPUTSINK, RIDI_DEVICENAME,
-        RIM_TYPEMOUSE, RID_INPUT,
+        RID_INPUT, RIM_TYPEMOUSE,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, RegisterClassExW,
@@ -50,7 +85,7 @@ mod imp {
     /// 間隔統計に使う直近ギャップ数 (8KHz で ~64ms、1KHz で ~0.5s 分)。
     const GAP_LEN: usize = 512;
     /// これより間隔が空いたら「動くのをやめた」とみなして区間を切る (ms)。
-    const SEG_BREAK_MS: u64 = 2;
+    const SEG_BREAK_MS: u64 = 12; // 125 Hz (8 ms) も連続区間として集計する。
     /// 区間として採用する最小の時間幅 (ms)。
     const SEG_MIN_SPAN_MS: u64 = 100;
     /// 区間として採用する最小レポート数。
@@ -81,7 +116,7 @@ mod imp {
             self.last_ms.saturating_sub(self.start_ms)
         }
         fn rate_hz(&self) -> f32 {
-            self.n as f32 / (self.span_ms() as f32 / 1000.).max(0.001)
+            self.n.saturating_sub(1) as f32 / (self.span_ms() as f32 / 1000.).max(0.001)
         }
         /// 採用できる区間か (短い揺れや孤立イベントを除く)。
         fn usable(&self) -> bool {
@@ -92,7 +127,7 @@ mod imp {
     struct Dev {
         /// デバイス名から引いた VID/PID (未取得なら None)。
         vidpid: Option<Option<(u16, u16)>>,
-        /// 直近 ~1.2 秒のイベント時刻 (エポックからの ms)。
+        /// 直近 ~1.2 秒のイベント時刻 (エポックからの µs)。
         events: VecDeque<u64>,
         /// 直近のイベント間隔 (ms)。
         gaps: VecDeque<f32>,
@@ -116,9 +151,10 @@ mod imp {
             }
         }
 
-        fn bump(&mut self, ms: u64, counts: Option<u32>) {
+        fn bump(&mut self, us: u64, counts: Option<u32>) {
+            let ms = us / 1000;
             if let Some(&prev) = self.events.back() {
-                let gap = ms.saturating_sub(prev) as f32;
+                let gap = us.saturating_sub(prev) as f32 / 1000.;
                 if gap > 0. {
                     self.gaps.push_back(gap);
                     while self.gaps.len() > GAP_LEN {
@@ -126,11 +162,11 @@ mod imp {
                     }
                 }
             }
-            self.events.push_back(ms);
+            self.events.push_back(us);
             while self
                 .events
                 .front()
-                .is_some_and(|t| ms.saturating_sub(*t) > 1200)
+                .is_some_and(|t| us.saturating_sub(*t) > 1_200_000)
             {
                 self.events.pop_front();
             }
@@ -175,52 +211,43 @@ mod imp {
         }
     }
 
-    /// `stats` の区間 1 件の公開形。
-    #[derive(Clone, Copy, Debug)]
-    pub struct SegInfo {
-        /// 区間内のレポート/秒。
-        pub rate_hz: f32,
-        /// 区間の時間幅 (ms)。
-        pub span_ms: u64,
-        /// 区間終了からの経過秒 (stats 呼び出し時点)。
-        pub age_s: f32,
-    }
-
-    /// 計測スナップショット — `stats` が 1 回のロックでまとめて返す。
-    #[derive(Clone, Debug, Default)]
-    pub struct PollStats {
-        /// 直近 1 秒のイベント数/秒 (止まっている時間も分母に入る下限値)。
-        pub hz: f32,
-        /// 250ms バケットのレート履歴 (古い→新しい、~15 秒)。
-        pub hist: Vec<f32>,
-        /// 直近イベントの最小間隔 (ms)。
-        pub min_gap_ms: Option<f32>,
-        /// 直近イベント間隔の (中央値, p95) [ms] — 真のレポート周期が出る。
-        pub gap_stats: Option<(f32, f32)>,
-        /// 直近の「動いている区間」のレート (進行中 ≥60ms or 直近確定 ≤1.5s)。
-        pub seg_hz: Option<f32>,
-        /// `seg_hz` の区間幅 (ms)。
-        pub seg_span_ms: Option<u64>,
-        /// 直近 10 秒に終わった区間の最大レート (「ピーク」)。
-        pub peak_hz: Option<f32>,
-        /// 直近区間の移動量合計/秒 (|dx|+|dy|) — この速度・DPI での理論上限 ≒ これ。
-        pub counts_per_sec: Option<f32>,
-        /// 直近区間で |d|≤1 のレポートの割合 — 高いほど DPI/速度が足りない。
-        pub low_frac: Option<f32>,
-        /// 確定区間 (新しい順、最大 128) — 5 秒計測等の窓切りに使う。
-        pub segs: Vec<SegInfo>,
-    }
-
     struct Meter {
         devs: HashMap<usize, Dev>,
         /// 時刻の起点 (最初のイベント時刻)。
         epoch: Option<Instant>,
+        trial: Option<Trial>,
+    }
+
+    struct Trial {
+        start: Instant,
+        end: Instant,
+        devs: HashMap<usize, Dev>,
+    }
+
+    /// テスト画面の計測窓。通常の履歴とは独立に、開始後のマウス入力だけを数える。
+    pub fn begin_trial(start: Instant, end: Instant) {
+        METER.lock().unwrap_or_else(|p| p.into_inner()).trial = Some(Trial {
+            start,
+            end,
+            devs: HashMap::new(),
+        });
+    }
+
+    pub fn finish_trial(vid: u16, pid: u16) -> Option<PollStats> {
+        let mut trial = METER
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .trial
+            .take()?;
+        let end_us = (trial.end - trial.start).as_micros() as u64;
+        snapshot(&mut trial.devs, vid, pid, end_us)
     }
 
     static METER: std::sync::LazyLock<Mutex<Meter>> = std::sync::LazyLock::new(|| {
         Mutex::new(Meter {
             devs: HashMap::new(),
             epoch: None,
+            trial: None,
         })
     });
     static STARTED: AtomicBool = AtomicBool::new(false);
@@ -332,21 +359,31 @@ mod imp {
         let hdev = raw.header.hDevice as usize;
         let counts = if raw.header.dwType == RIM_TYPEMOUSE {
             let m = unsafe { raw.data.mouse };
-            Some(m.lLastX.unsigned_abs().saturating_add(m.lLastY.unsigned_abs()))
+            Some(
+                m.lLastX
+                    .unsigned_abs()
+                    .saturating_add(m.lLastY.unsigned_abs()),
+            )
         } else {
             None
         };
         (hdev, counts)
     }
 
-    fn push(hdev: usize, counts: Option<u32>, now: Instant) {
-        let mut m = METER.lock().unwrap_or_else(|p| p.into_inner());
+    fn push(m: &mut Meter, hdev: usize, counts: Option<u32>, now: Instant) {
+        if let Some(trial) = m.trial.as_mut() {
+            if counts.is_some() && (trial.start..trial.end).contains(&now) {
+                let us = (now - trial.start).as_micros() as u64;
+                trial
+                    .devs
+                    .entry(hdev)
+                    .or_insert_with(Dev::new)
+                    .bump(us, counts);
+            }
+        }
         let epoch = *m.epoch.get_or_insert(now);
-        let ms = now.duration_since(epoch).as_millis() as u64;
-        m.devs
-            .entry(hdev)
-            .or_insert_with(Dev::new)
-            .bump(ms, counts);
+        let us = now.duration_since(epoch).as_micros() as u64;
+        m.devs.entry(hdev).or_insert_with(Dev::new).bump(us, counts);
     }
 
     fn on_input(lp: LPARAM) {
@@ -370,8 +407,9 @@ mod imp {
                     hdr_size,
                 );
                 if got != u32::MAX && got as usize >= size_of::<RAWINPUTHEADER>() {
+                    let mut meter = METER.lock().unwrap_or_else(|p| p.into_inner());
                     let (hdev, counts) = read_raw(&*(buf.as_ptr() as *const RAWINPUT));
-                    push(hdev, counts, now);
+                    push(&mut meter, hdev, counts, now);
                 }
                 // 2) キューに溜まった残りをまとめてドレイン (高周波向け公式手順)。
                 loop {
@@ -381,20 +419,27 @@ mod imp {
                         break;
                     }
                     if n == u32::MAX {
+                        use windows_sys::Win32::Foundation::{
+                            GetLastError, ERROR_INSUFFICIENT_BUFFER,
+                        };
+                        if GetLastError() != ERROR_INSUFFICIENT_BUFFER {
+                            break;
+                        }
                         // バッファ不足 → 必要量か 2 倍で拡張してやり直し。
                         let need = (sz as usize).div_ceil(8);
                         buf.resize(need.max(buf.len() * 2), 0);
                         continue;
                     }
                     let mut p = buf.as_ptr() as *const RAWINPUT;
+                    let now = Instant::now();
+                    let mut meter = METER.lock().unwrap_or_else(|p| p.into_inner());
                     for _ in 0..n {
                         let raw = &*p;
                         let (hdev, counts) = read_raw(raw);
-                        push(hdev, counts, now);
+                        push(&mut meter, hdev, counts, now);
                         // NEXTRAWINPUTBLOCK 相当: header.dwSize をポインタ境界に揃えて進む。
-                        let adv =
-                            (raw.header.dwSize as usize + size_of::<usize>() - 1)
-                                & !(size_of::<usize>() - 1);
+                        let adv = (raw.header.dwSize as usize + size_of::<usize>() - 1)
+                            & !(size_of::<usize>() - 1);
                         p = (p as *const u8).add(adv) as *const RAWINPUT;
                     }
                 }
@@ -420,10 +465,12 @@ mod imp {
             {
                 return None;
             }
-            let name = String::from_utf16_lossy(&buf);
+            let name = String::from_utf16_lossy(&buf).to_ascii_uppercase();
             let hex = |tag: &str| {
-                name.find(tag)
-                    .and_then(|i| u16::from_str_radix(&name[i + 4..i + 8], 16).ok())
+                name.find(tag).and_then(|i| {
+                    name.get(i + 4..i + 8)
+                        .and_then(|hex| u16::from_str_radix(hex, 16).ok())
+                })
             };
             Some((hex("VID_")?, hex("PID_")?))
         }
@@ -433,17 +480,27 @@ mod imp {
     pub fn stats(vid: u16, pid: u16) -> Option<PollStats> {
         let mut m = METER.lock().unwrap_or_else(|p| p.into_inner());
         let now = Instant::now();
-        let now_ms = m
+        let now_us = m
             .epoch
-            .map(|e| now.duration_since(e).as_millis() as u64)
+            .map(|e| now.duration_since(e).as_micros() as u64)
             .unwrap_or(0);
 
+        snapshot(&mut m.devs, vid, pid, now_us)
+    }
+
+    fn snapshot(
+        devs: &mut HashMap<usize, Dev>,
+        vid: u16,
+        pid: u16,
+        now_us: u64,
+    ) -> Option<PollStats> {
+        let now_ms = now_us / 1000;
         let mut st = PollStats::default();
         let mut merged_buckets: HashMap<u64, u32> = HashMap::new();
         let mut all_gaps: Vec<f32> = Vec::new();
         let mut found = false;
 
-        for (&hdev, d) in m.devs.iter_mut() {
+        for (&hdev, d) in devs.iter_mut() {
             let vp = match d.vidpid {
                 Some(v) => v,
                 None => {
@@ -461,7 +518,7 @@ mod imp {
             st.hz += d
                 .events
                 .iter()
-                .filter(|t| now_ms.saturating_sub(**t) <= (WINDOW_SECS * 1000.) as u64)
+                .filter(|t| now_us.saturating_sub(**t) < (WINDOW_SECS * 1_000_000.) as u64)
                 .count() as f32;
             for &(i, c) in &d.buckets {
                 *merged_buckets.entry(i).or_default() += c;
@@ -486,7 +543,7 @@ mod imp {
             }
             if d.seg.n > 0 {
                 let s = d.seg;
-                if now_ms.saturating_sub(s.last_ms) <= PEAK_WINDOW_MS {
+                if s.usable() && now_ms.saturating_sub(s.last_ms) <= PEAK_WINDOW_MS {
                     st.peak_hz = Some(st.peak_hz.map_or(s.rate_hz(), |p: f32| p.max(s.rate_hz())));
                 }
                 if newest.is_none_or(|(t, ..)| s.last_ms > t) {
@@ -500,8 +557,8 @@ mod imp {
                 } else {
                     s.usable() && now_ms.saturating_sub(last) <= SEG_FRESH_MS
                 };
-                if ok {
-                    st.seg_hz = Some(st.seg_hz.map_or(s.rate_hz(), |p: f32| p.max(s.rate_hz())));
+                if ok && st.seg_hz.is_none_or(|rate| s.rate_hz() > rate) {
+                    st.seg_hz = Some(s.rate_hz());
                     st.seg_span_ms = Some(s.span_ms());
                     let secs = (s.span_ms() as f32 / 1000.).max(0.001);
                     st.counts_per_sec = Some(s.counts as f32 / secs);
@@ -515,16 +572,11 @@ mod imp {
         st.hz /= WINDOW_SECS;
 
         // 履歴グラフ (バケットを連番に展開)。
-        let (mut lo, mut hi) = (u64::MAX, 0u64);
-        for &i in merged_buckets.keys() {
-            lo = lo.min(i);
-            hi = hi.max(i);
-        }
-        if lo <= hi {
-            st.hist = (lo..=hi)
-                .map(|i| *merged_buckets.get(&i).unwrap_or(&0) as f32 / (BUCKET_MS as f32 / 1000.))
-                .collect();
-        }
+        let hi = now_ms / BUCKET_MS;
+        let lo = hi.saturating_sub(HIST_LEN as u64 - 1);
+        st.hist = (lo..=hi)
+            .map(|i| *merged_buckets.get(&i).unwrap_or(&0) as f32 / (BUCKET_MS as f32 / 1000.))
+            .collect();
 
         // 間隔統計 (0.05ms 未満は dispatch 合体ノイズとして除外 — 8K の真間隔は 0.125ms)。
         const FLOOR_MS: f32 = 0.05;
@@ -537,34 +589,92 @@ mod imp {
             let pct = |q: f32| all_gaps[((all_gaps.len() - 1) as f32 * q) as usize];
             st.gap_stats = Some((pct(0.5), pct(0.95)));
         }
-        st.segs.sort_by(|a, b| a.age_s.partial_cmp(&b.age_s).unwrap_or(std::cmp::Ordering::Equal));
+        st.segs.sort_by(|a, b| {
+            a.age_s
+                .partial_cmp(&b.age_s)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         Some(st)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn trial_excludes_keyboard_and_events_outside_window() {
+            use std::time::Duration;
+            let start = Instant::now();
+            let end = start + Duration::from_secs(5);
+            let mut meter = Meter {
+                epoch: None,
+                devs: HashMap::new(),
+                trial: Some(Trial {
+                    start,
+                    end,
+                    devs: HashMap::new(),
+                }),
+            };
+            push(&mut meter, 1, Some(2), start - Duration::from_millis(1));
+            push(&mut meter, 1, Some(2), start);
+            push(&mut meter, 2, None, start);
+            push(&mut meter, 1, Some(2), end);
+            let trial = meter.trial.unwrap();
+            assert_eq!(trial.devs.len(), 1);
+            assert_eq!(trial.devs[&1].events, [0]);
+            assert_eq!(meter.devs[&1].seg.n, 1);
+        }
+
+        #[test]
+        fn continuous_125hz_motion_forms_a_segment() {
+            let mut dev = Dev::new();
+            for i in 0..=125 {
+                dev.bump(i * 8000, Some(1));
+            }
+            assert!(dev.seg.usable());
+            assert_eq!(dev.seg.rate_hz(), 125.);
+        }
+
+        #[test]
+        fn high_rate_motion_then_long_idle() {
+            let mut dev = Dev::new();
+            dev.vidpid = Some(Some((1, 2)));
+            let mut meter = Meter {
+                epoch: None,
+                trial: None,
+                devs: HashMap::from([(1, dev)]),
+            };
+            meter.devs.get_mut(&1).unwrap().bump(0, Some(1));
+            assert!(snapshot(&mut meter.devs, 1, 2, 0)
+                .unwrap()
+                .peak_hz
+                .is_none());
+            for i in 1..=8000 {
+                meter.devs.get_mut(&1).unwrap().bump(i * 125, Some(1));
+            }
+            let st = snapshot(&mut meter.devs, 1, 2, 1_000_000).unwrap();
+            assert_eq!(st.hz, 8000.);
+            assert_eq!(st.gap_stats, Some((0.125, 0.125)));
+            assert_eq!(st.peak_hz, Some(8000.));
+            let later = 3_600_000_000;
+            meter.devs.get_mut(&1).unwrap().bump(later, Some(1));
+            let st = snapshot(&mut meter.devs, 1, 2, later).unwrap();
+            assert_eq!(st.hist.len(), HIST_LEN);
+            assert_eq!(st.hz, 1.);
+            assert!(st.peak_hz.is_none());
+        }
     }
 }
 
 #[cfg(windows)]
-pub use imp::{start, start_mouse, stats, PollStats, SegInfo};
+pub use imp::{begin_trial, finish_trial, start, start_mouse, stats};
 
 #[cfg(not(windows))]
 mod stub {
-    #[derive(Clone, Copy, Debug)]
-    pub struct SegInfo {
-        pub rate_hz: f32,
-        pub span_ms: u64,
-        pub age_s: f32,
-    }
-    #[derive(Clone, Debug, Default)]
-    pub struct PollStats {
-        pub hz: f32,
-        pub hist: Vec<f32>,
-        pub min_gap_ms: Option<f32>,
-        pub gap_stats: Option<(f32, f32)>,
-        pub seg_hz: Option<f32>,
-        pub seg_span_ms: Option<u64>,
-        pub peak_hz: Option<f32>,
-        pub counts_per_sec: Option<f32>,
-        pub low_frac: Option<f32>,
-        pub segs: Vec<SegInfo>,
+    use super::PollStats;
+    pub fn begin_trial(_: std::time::Instant, _: std::time::Instant) {}
+    pub fn finish_trial(_: u16, _: u16) -> Option<PollStats> {
+        None
     }
     pub fn start() {}
     pub fn start_mouse() {}
@@ -574,4 +684,4 @@ mod stub {
 }
 
 #[cfg(not(windows))]
-pub use stub::{start, start_mouse, stats, PollStats, SegInfo};
+pub use stub::{begin_trial, finish_trial, start, start_mouse, stats};
