@@ -438,7 +438,7 @@ impl Shell {
         } else {
             self.meas_method
         };
-        let st = if method == 0 {
+        let st = if keyboard || !usb_ok {
             st?
         } else {
             st.unwrap_or_default()
