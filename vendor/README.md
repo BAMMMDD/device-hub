@@ -38,7 +38,8 @@
   Regular / Clear の素材式を `gpui-pre-windows/src/liquid_glass.hlsl` へ移植。Windows の領域単位の
   snapshot、縮小 Gaussian と組み合わせ、dark tint と light Clear のコントラストを調整。
   `Backdrop::glass` で素材と操作エネルギーを渡す。同一層の隣り合う同一素材を統合する。
-  出典と MIT / Apache-2.0 の全文は `../licenses/gpui-liquid-glass-*`、配布物では `THIRD-PARTY-RENDERING.txt`。
+  移植元の MIT ライセンスは [gpui-liquid-glass-LICENSE-MIT](../licenses/gpui-liquid-glass-LICENSE-MIT)、
+  GPUI の Apache-2.0 は各 vendor ディレクトリ内の `LICENSE-APACHE` を参照。どちらも Windows 配布物に同梱する。
 
 - 2026-10-13: gpui-kit 0.7.3 に合わせて 0.3.7 → 0.3.9。上の表の差分はそのまま当たった (window.rs は 182 行ずれただけ)。
   描画 (directx_renderer.rs / shaders.hlsl / style.rs) は上流で変化なし。旧版 (0.1.15) と 5 画面の撮影が画素単位で一致。

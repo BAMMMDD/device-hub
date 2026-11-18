@@ -1,10 +1,9 @@
 # LAMZU MAYA X V2 (LM20) 再監査 — 2026-11-17 (2 回目)
 
 対象: Device HUB `249b806`（前回監査 [LAMZU_MAYA_X_V2_AUDIT.md](LAMZU_MAYA_X_V2_AUDIT.md) の修正後）と公式 LAMZU Aurora。
-公式の配布物は 2026-11-17 15:30 JST 時点でも `index-DxSz_fAU.js` のまま。`/Config/env-models.json` の `Maya X(LM20)` 行は
-`analysis/lamzu-env-models.json` と同じ内容 (行単位で照合)。
-根拠はすべて `analysis/` の保存済みバンドル: プロトコル層 = `lamzu-index-DxSz_fAU.js` (`lamzu-class-methods.txt` に抽出済み)、
-設定画面 = `lamzu-index-Bn9q780G.js`。LM20 が通る初期化経路は **`T2()`** (`IsSensorModelCmd=1` の分岐、`fM()` でポーリング変換)。
+2026-11-17 15:30 JST に [公式 Aurora](https://www.lamzu.net/#/project/items) の配布物を再照合。
+機種定義の Maya X (LM20) は前回から変更なし。LM20 の初期化はセンサーモデル取得が有効な分岐を通り、
+ポーリングレートの変換を伴う。
 別メーカー (`vid==13652`=0x3554) 用の `K2()` / `uM()` 経路は LM20 には使われない。
 今回は**コードを変更していない**し、実機にも書き込んでいない (別エージェントが同時に `lamzu.rs` を編集中のため)。
 

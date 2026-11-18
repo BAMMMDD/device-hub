@@ -23,12 +23,8 @@ jobs:
         run: cargo test --workspace --locked
       - name: Release build
         run: cargo build --release --locked -p device-hub -p devhub-obs
-      - name: Package OBS plugin
-        run: |
-          New-Item -ItemType Directory -Force dist/devhub_obs/bin/64bit, dist/devhub_obs/data/locale | Out-Null
-          Copy-Item target/release/devhub_obs.dll dist/devhub_obs/bin/64bit/
-          Copy-Item crates/devhub-obs/data/locale/*.ini dist/devhub_obs/data/locale/
-          Copy-Item target/release/device-hub.exe dist/
+      - name: Stage Windows distribution
+        run: ./scripts/package-windows.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: device-hub-windows-x64

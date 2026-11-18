@@ -67,6 +67,16 @@ Copy `target/release/devhub_obs.dll` to
 `crates/devhub-obs/data/locale/` to `...\devhub_obs\data\locale\`, then restart
 OBS and add a "Device HUB Live" source. The plugin does not need the app.
 
+To stage a Windows release with its license files, run these commands in PowerShell:
+
+```powershell
+cargo build --release --locked -p device-hub -p devhub-obs
+./scripts/package-windows.ps1
+```
+
+Archive the contents of `dist/` for the full release or the contents of
+`dist/devhub_obs/` for the standalone OBS plugin.
+
 ## Repository layout
 
 ```
@@ -77,7 +87,6 @@ crates/devhub-obs     OBS source plugin + CPU renderer
 crates/devhub-update  firmware update notifications
 vendor/               gpui-pre / gpui-pre-windows with GPU backdrop patch
 docs/                 protocol notes, frontend structure, OBS overlay, add-device guide
-analysis/             saved responses/JS from the official web configurators (analysis only)
 ```
 
 ## Notes
@@ -87,6 +96,9 @@ analysis/             saved responses/JS from the official web configurators (an
 - Rapid Trigger and similar settings write to the device's EEPROM. This is a
   personal project; use at your own risk.
 - See `AGENTS.md` / `docs/` for architecture details and how to add a device.
+
+Protocol notes and test captures are kept in [docs/PROTOCOL_NOTES.md](docs/PROTOCOL_NOTES.md) and
+[crates/devhub-hid/fixtures](crates/devhub-hid/fixtures). Vendor web bundles are not part of the source distribution.
 
 ## License
 

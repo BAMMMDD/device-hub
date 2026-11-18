@@ -51,30 +51,69 @@ _1KDonglePollingRate _4KDonglePollingRate _8KDonglePollingRate commonDelay MID B
 **ATK F1 Ultimate はこの表に無い。** mouse.fit の「別のドライバリンク (LinkJump)」先か、ATK 独自の
 configurator の可能性が高い。実機の VID/PID を取ってから判断する (docs/ADD_DEVICE.md §7)。
 
-### 1.3 コマンド・アドレス (本体 JS の定数そのまま)
+### 1.3 コマンド・ボタン種別・EEPROM アドレス
 
+出典: [mouse.fit の設定ツール](https://www.mouse.fit/) の通信処理を解析して整理。実機で確認した report-8 の対応は §1.4 を参照。
 
-マクロ送信時は 65B バッファの `[12..]` を `^ 0x55` で難読化している (`f[g]^=85`)。マクロ名は GBK 変換表を内蔵。
+| 操作 | コマンド番号 |
+| --- | ---: |
+| 設定消去 | 9 |
+| プロファイル切替 | 15 |
+| 長距離モード設定 | 22 |
+| 長距離モード読み出し | 23 |
+| 校正開始 | 46 |
 
-プロトコルクラス `cm` のメソッド (= Web 版が持つ全操作。**機能網羅のチェックリスト**):
+| 割り当て | 種別バイト |
+| --- | ---: |
+| 無効 | 0 |
+| マウスボタン | 1 |
+| DPI切替 | 2 |
+| 連射 | 4 |
+| ショートカット | 5 |
+| マクロ | 6 |
+| ポーリング切替 | 7 |
+| DPIロック | 10 |
+| 上下スクロール | 11 |
 
-```
-getFirmwareVersion* getDongleFirmwareVersion getRFAddress getEID getDonglePR getBatPer getOldBattery
-getLongDistanceMode/set  setProfileID/getProfileID/getProfileList  setPollingRate/getPollingRate getPollRate/setPollRate
-getLiftOffDebounce(New)/set  getDebounceTime/set getDebounce/set  getSensorIndex/set  getTrackingMode/set
-getCompitiveMode/set  getSPDTState(New)/set  getScrollScanConfig/set  getWheelDebounce/set  getSleepTime/set
-getLedState/set  getAngleTune(New)/set  getSensorModel  getPollingInfoLevel/set  getLOD/set
-getSensorVirtualPos/set  startCalibr  getMSButtonTrigger/FastTrigger/TactileFeedback + set*
-getLiftOff/set  getButtonCombine/set  getDPIIndicator/set  getDPIXYOnOff/set  getAngleSnap(GW)/set
-getMotionSync(GW)/set  getHyperMode/set  getRippleControl/set  getDeviceLightingEnable/set
-resetProfile resetDevice defaultDevice*  getDPIStageInfo/set getActiveDPI/set GetDPIMax setActiveDPIValue
-setDPIStageNum GetDPIStageColors/Set  SetLightEffect/Get GetLightness/Set
-AllocateMacroDataSize SetMacroData GetMacroDataSize GetMacroData GetMacroByButtonID Set_MS_Macro* DeleteMacro
-Set_MS_KeyFunction/Get SetButton/GetButton SetButtonByDeviceID  Set_MS_ShortcutKey/Get
-enterBL getBLFWVer erase program verify exitBL (ファーム更新)  enterPairMode getPairResult
-Get_Device_Eeprom_Buffer Set_Device_Eeprom_Value Set_Device_Eeprom_Array Set_MS_DPIValue(_XY)
-setHyperModePerformanceTime getDPIMaxStageNum GetUSBPID SetUSB1KIDVDPID
-```
+| 設定 | EEPROM オフセット（10進） |
+| --- | ---: |
+| ポーリング | 0 |
+| 最大DPI段数 | 2 |
+| 現在のDPI段 | 4 |
+| ボタン動作 | 8 |
+| LOD | 10 |
+| DPI値 | 12 |
+| DPI色 | 44 |
+| DPI LED効果 | 76 |
+| DPI LED状態 | 82 |
+| 押下デバウンス | 169 |
+| モーション同期 | 171 |
+| スリープ | 173 |
+| センサー角度 | 175 |
+| リップル抑制 | 177 |
+| 競技モード状態 | 181 |
+| 性能設定 | 183 |
+| 直線補正値 | 189 |
+| 直線補正状態 | 191 |
+| 20K FPS | 225 |
+| ホイールデバウンス | 227 |
+| 解放デバウンス | 229 |
+| 左作動点 | 239 |
+| 左高速トリガー | 241 |
+| 左触覚フィードバック | 243 |
+| 右作動点 | 245 |
+| 右高速トリガー | 247 |
+| 右触覚フィードバック | 249 |
+| ボタン割り当て | 96 |
+| ショートカット | 256 |
+| マクロ | 768 |
+| 3955のDPI | 6912 |
+| 仮想センサー位置の有効化 | 6984 |
+| 仮想センサー位置 | 6986 |
+
+マクロ送信時は 65 バイトのバッファのオフセット 12 以降に XOR 0x55 を適用する。マクロ名は GBK。
+
+公式ツールの機能範囲: FW・電池・受信機情報、プロファイル、DPI と LED、ポーリング、センサー・省電力、磁気ボタンと校正、割り当てとマクロ、ペアリング、ファーム更新。機能別の対応状況は [BACKEND_BRIEF.md](BACKEND_BRIEF.md) を参照。
 
 ### 1.4 実機で検証済み — report-8/EEPROM 経路 (JS の `Die` クラス)
 
@@ -784,9 +823,7 @@ firmwareMark:"f1", upgradeTogether:true, BottomButton:false, DpiRgb:false, DpiTo
 ## 5. LAMZU Aurora (www.lamzu.net) — Maya X V2 (LM20) 実機検証済み
 
 2026-11-17 再照合: [公式 Aurora](https://www.lamzu.net/#/project/items) の
-[機種定義](https://www.lamzu.net/Config/env-models.json) は v1.0.38。設定の共通処理
-(`analysis/lamzu-index-DxSz_fAU.js`) と設定画面 (`analysis/lamzu-index-Bn9q780G.js`)
-を含め、取得した配布ファイルは保存済みスナップショットとバイト単位で一致。
+[機種定義](https://www.lamzu.net/Config/env-models.json) は v1.0.38。取得した設定処理と画面の配布ファイルは、監査時の比較で前回取得分と一致。
 有線 `37B0:0044` / FW `0.0.3.0` の読み取りは `lamzuprobe` で再現できる。
 過去の書き込み検証と今回の読み取り確認は区別する。
 後続の [アプリ実装監査](LAMZU_MAYA_X_V2_AUDIT.md) では無線 `37B0:0048` を実機確認し、

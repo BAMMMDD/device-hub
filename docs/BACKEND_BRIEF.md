@@ -35,9 +35,7 @@ P2 = Web 版にあるたまに使う機能、P3 = 機種限定・リスクが高
 
 ### 2.1 キーボード — hub.xsyd.top (SU66 Max, `xsyd.rs`)
 
-根拠のコードは `analysis/` に保存済み: `dshk-device.js` (プロトコル SDK 全体、dshk.xsyd.top から)、
-`xsyd-KeyPerformance-*.js`、`xsyd-advanced-key-*.js`、`xsyd-lighting-*.js`、`xsyd-macro-*.js`、
-`xsyd-config-*.js`、`xsyd-settings-*.js`、`xsyd-chunks/`。
+根拠: [公式 Web HUB](https://hub.xsyd.top/keyboard) の挙動と実機検証。[PROTOCOL_NOTES.md](PROTOCOL_NOTES.md) §2 を参照。
 
 | 機能 | SDK のメソッド | 表し方 | 現状 | 優先 |
 |---|---|---|---|---|
@@ -65,8 +63,7 @@ P2 = Web 版にあるたまに使う機能、P3 = 機種限定・リスクが高
 
 ### 2.2 マウス — www.mouse.fit (`mousefit8.rs` ドングル, `mousefit.rs` 有線)
 
-根拠: `analysis/` の `mousefit-index.js` (本体)、`mf-enums*.txt` `mf-defs*.txt` `mf-methods.txt`、
-`env-models.json` (機種表)。EEPROM アドレスは PROTOCOL_NOTES §1.3。
+根拠: [mouse.fit](https://www.mouse.fit/) の挙動と実機検証。EEPROM アドレスは [PROTOCOL_NOTES.md](PROTOCOL_NOTES.md) §1.3。
 
 | 機能 | 根拠 (JS / EEPROM) | 表し方 | 現状 | 優先 |
 |---|---|---|---|---|

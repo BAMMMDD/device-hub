@@ -2,7 +2,7 @@
 
 対象は Device HUB の `e75c453` と [LAMZU Aurora v1.0.38](https://www.lamzu.net/#/project/items)。
 [公式の機種定義](https://www.lamzu.net/Config/env-models.json) と、配布中の共通バンドル
-`index-DxSz_fAU.js`、設定画面 `index-Bn9q780G.js` は、`analysis/` の保存済みファイルとバイト単位で一致した。
+`index-DxSz_fAU.js`、設定画面 `index-Bn9q780G.js` は、前回取得したローカルの比較用ファイルとバイト単位で一致した。
 [公式製品名](https://lamzu.com/products/lamzu-maya-x-v2) は **LAMZU MAYA X V2**、Aurora の機種行は
 **Maya X(LM20)**。旧 `37B0:001F` の「MayaX V2」は別リビジョンで、今回の対象外。
 

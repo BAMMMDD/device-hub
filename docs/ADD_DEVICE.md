@@ -79,7 +79,9 @@ const a = Object.assign(document.createElement('a'), {href: URL.createObjectURL(
 | `J(this,"getXxx"` / `async getXxx(` | プロトコルクラスのメソッド = 操作の全一覧 |
 | `{ReportRate:0, ...}` のような定数オブジェクト | アドレス表・コマンド番号 |
 
-結果は `docs/PROTOCOL_NOTES.md` に追記する (後の人が JS を読み直さなくて済むように)。
+結果は自分の言葉で整理し、出典と実機での確認範囲を添えて `docs/PROTOCOL_NOTES.md` に追記する。
+取得した配布ファイルやコードの抜粋は Git 管理外に置く。通信記録をテストに使う場合は、
+必要な HID レポートだけを取り出し、シリアル番号や個人設定が含まれていないか確認する。
 
 ### 2.3 通信を記録する (フィールド位置の確定)
 

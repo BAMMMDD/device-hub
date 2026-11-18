@@ -6,7 +6,8 @@ Device HUB bundles or derives from the following third-party works.
 
 | Package | Copyright | License | Notes |
 | --- | --- | --- | --- |
-| `vendor/gpui-pre`, `vendor/gpui-pre-windows` | Zed Industries | Apache-2.0 (`LICENSE-APACHE` inside each dir) | GPUI fork with a GPU backdrop-filter patch; see `vendor/README.md` |
+| `vendor/gpui-pre`, `vendor/gpui-pre-windows` | Zed Industries | Apache-2.0 (`LICENSE-APACHE` in each source dir; `licenses/gpui-pre*-LICENSE-APACHE` in Windows packages) | GPUI fork with a GPU backdrop-filter patch; see `vendor/README.md` in the source tree |
+| Shader material adapted from gpui-liquid-glass | 1234igor | MIT (`licenses/gpui-liquid-glass-LICENSE-MIT`) | DirectX adaptation of revision `c002c4d3758f934fdfaf173e8214a24eb65a05cd` |
 
 ## Bundled fonts (`crates/device-hub/fonts/`)
 
@@ -14,24 +15,17 @@ All embedded into `device-hub.exe` at build time.
 
 | Font | Copyright | License |
 | --- | --- | --- |
-| Geist | Vercel | SIL Open Font License 1.1 |
-| IBM Plex Sans JP | IBM | SIL Open Font License 1.1 |
-| Zen Maru Gothic | Yoshimichi Ohira | SIL Open Font License 1.1 |
-
-OFL 1.1 permits bundling with an application provided the fonts are not sold
-by themselves and this notice is preserved. The full license text:
-<https://openfontlicense.org>
+| Geist | The Geist Project Authors | SIL OFL 1.1 (`licenses/Geist-OFL.txt`) |
+| IBM Plex Sans JP | IBM Corp. | SIL OFL 1.1 (`licenses/IBMPlexSansJP-OFL.txt`) |
+| Zen Maru Gothic | The Zen Maru Gothic Authors | SIL OFL 1.1 (`licenses/ZenMaruGothic-OFL.txt`) |
 
 ## Icons
 
-`crates/device-hub/assets/icon.{ico,png}` and the in-app icon set are part of
-Device HUB itself (Lucide-derived SVG paths for UI icons, ISC-licensed
-<https://lucide.dev>).
+The UI includes SVG paths derived from [Lucide](https://lucide.dev) (ISC,
+with MIT terms for icons derived from Feather). See `licenses/lucide-LICENSE`.
 
 ## Analysis material
 
-`analysis/` contains network captures and downloaded JavaScript from the
-vendor web configurators (mouse.fit / hub.xsyd.top). Those files are NOT
-Device HUB code: they are kept only for protocol-interoperability analysis,
-are the property of their respective vendors, and are not covered by this
-repository's license grant.
+The repository documents observed protocol behavior and includes device
+report captures used as test fixtures. Copies of vendor web bundles and
+extracted source files are kept outside the tracked source tree.

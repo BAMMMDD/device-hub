@@ -37,7 +37,7 @@ docs/FRONTEND.md        フロントエンドの構造
 - devhub-hid: 実装済 — `transport.rs` (feature/output/input report) + `mousefit.rs`
   (feature-report 用に温存、現行機種は使わない) + `mousefit8.rs` (report-8/EEPROM、有線・ドングル共通)
   + `xsyd.rs` (SU66 Max) + `atk.rs` (ATK HUB 系、report-8/EEPROM、CID/MID 機種確定)。
-  v1 時代のコードは `legacy/`、解析作業ファイルは `analysis/`。
+  v1 時代のコードは `legacy/`、解析用に取得した配布原本は Git 管理外（`.private-analysis/`）。
   検証用 example: `enum` (列挙) / `kbdiff` (SU66 差分読み出し) / `lite2e` (ライティング往復) / `tp55e2e` (TP55 EQ 往復)
   / `atkprobe` (ATK 生 EEPROM) / `atkread` (ATK ドライバ経路の読み書き往復)。
 - **mouse.fit 経路**: 有線 5219 もドングル 3854 も feature report を持たず
