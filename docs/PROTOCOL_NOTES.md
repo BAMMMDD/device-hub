@@ -1128,12 +1128,17 @@ get/set は cmd が +0x80/同一値の関係。`devID` はプロファイル番�
 
 ## 7. Logitech HID++ 2.0 汎用ドライバ (0x8100 Onboard Profiles)
 
-Open-source `libratbag` (`hidpp20.c`) 仕様および Windows `046D:C53F` 実機プローブ知見に基づく設計:
+Open-source `libratbag` (`hidpp20.c`) 仕様および実機 `046D:C53F` (G304, WPID `0x4074`)・`046D:C539` (G703 HERO, WPID `0x4086`) の `logiprobe` / `logie2e` 検証知見:
 
-- **Windows デュアルチャネル**: `0xFF00:0x02` (Long 20B, Report ID `0x11`) と `0xFF00:0x01` (Short 7B, Report ID `0x10`) を同時オープン。Windows では Long 宛てコマンドの受信機側エラー `0x8F`（スリープ中 `ERR_RESOURCE_ERROR = 0x09` 等）が **Short チャネルへ返る**ため、両方を監視する。
-- **レシーバーレジスタ (`dev_idx=0xFF`)**: HID++ 1.0 `0x81/0xF1` (ドングル FW)、`0x83/0xB5` (`0x20`→WPID、`0x40`→ペア機種名 ASCII — 実機で WPID `0x4074` = `"G304"` 取得確認)。
+- **Windows デュアルチャネル**: `0xFF00:0x02` (Long 20B, Report ID `0x11`) と `0xFF00:0x01` (Short 7B, Report ID `0x10`) を同時オープン。Windows では Long 宛てコマンドの受信機側エラー `0x8F`（スリープ中 `ERR_RESOURCE_ERROR = 0x09` 等）が **Short チャネルへ返る**ため、両方を監視し、`buf[3] == ((func & 0x0F) << 4) | SW_ID` を厳密照合する。
+- **レシーバーレジスタ (`dev_idx=0xFF`)**: HID++ 1.0 `0x81/0xF1` (ドングル FW)、`0x83/0xB5` (`0x20`→WPID、`0x40`→ペア機種名 ASCII — 実機で WPID `0x4074` `"G304"`, `0x4086` `"G703 LS"` を確認)。
 - **動的 Feature 検出 (`IRoot 0x0000` → `IFeatureSet 0x0001`)**:
-  - `0x0003` DeviceFwInfo / `0x0005` DeviceName / `0x1004` UnifiedBattery / `0x1000` BatteryStatus / `0x1001` BatteryVoltage
-  - `0x2201` AdjustableDPI (`getSensorDpiList` の `0xE000 | step` マーカーまたは離散リストから機種固有の min/max/step を取得)
-  - `0x8060` / `0x8061` ReportRate / `0x8070` ColorLedEffects
-  - `0x8100` OnboardProfiles (256B セクタ RMW + CRC-16/CCITT-FALSE, `dpi[5]` LE16@3, `buttons[16]` 4B@32, `name` 48B@160, `leds[2]` 11B@208, `crc` BE16@254)。ディレクトリセクタ `0x0000` 未書込みの G304/G305 クワーク時は ROM `0x0101..` へフォールバックし、初回書込み時にユーザーセクタ + ディレクトリを生成する。
+  - `0x0003` DeviceFwInfo / `0x0005` DeviceName / `0x1004` UnifiedBattery / `0x1000` BatteryStatus (G304) / `0x1001` BatteryVoltage (G703 HERO: 充電フラグ `(flags & 0x80) != 0 && (flags & 0x07) <= 3`)
+  - `0x2201` AdjustableDPI (`getSensorDpiList` の `0xE000 | step` マーカー: G304 は 200..12000 step 50、G703 HERO は 100..25600 step 50)
+  - `0x8060` ReportRate (`0x8061` 拡張対応): 実機ビットマスク `0x8B` は `bit N = (N + 1) ms`（`bit0=1000Hz, bit1=500Hz, bit3=250Hz, bit7=125Hz`）。
+  - `0x8070` ColorLedEffects / `0x8071` RgbEffects (G703 HERO で搭載確認: `getInfo` が 0 でも `0x8100` セクタ内の `leds[0]` ロゴ `208..219` / `leds[1]` ホイール `219..230` および `alt_leds` `230..252` の 2 ゾーンが有効)。
+  - `0x8100` OnboardProfiles (実機は **`sector_size = 255`**、`prof_fmt=3` G304 / `prof_fmt=4` G703 HERO):
+    - セクタ読出しの末尾オフセットは `off = sector_size - 16` (`239`) へクランプ必須（`off = 240` は `ERR_INVALID_ARGUMENT = 0x02` となる）。
+    - 書込み・CRC 検証サイズも実 `sector_size` (255B) を維持し、CRC-16/CCITT-FALSE (BE16) は末尾 2 バイト `[253..255]`（256B 機では `[254..256]`）に配置。
+    - フォーマットは `report_rate@0`, `default_dpi@1`, `switched_dpi@2`, `dpi[5]` LE16@3, `buttons[16]` 4B@32, `name` 48B@160, `leds[2]` 11B×2@208, `alt_leds[2]` 11B×2@230, `crc` BE16@`sec_size-2`。
+    - ROM セクタ `0x0101` は末尾 `0xFF 0xFF` で CRC 未設定のため `check_crc=false` で読み、ディレクトリ `0x0000` 未書込み/無効時・個別プロファイル不良時は ROM へフォールバックして初回書込み時にユーザーセクタ + ディレクトリを生成する。

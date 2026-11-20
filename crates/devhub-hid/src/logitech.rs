@@ -30,6 +30,7 @@ const FEAT_ADJUSTABLE_DPI: u16 = 0x2201;
 const FEAT_REPORT_RATE: u16 = 0x8060;
 const FEAT_EXT_REPORT_RATE: u16 = 0x8061;
 const FEAT_COLOR_LED_EFFECTS: u16 = 0x8070;
+const FEAT_RGB_EFFECTS: u16 = 0x8071;
 const FEAT_ONBOARD_PROFILES: u16 = 0x8100;
 
 type Watcher = Option<Arc<dyn Fn(HubEvent) + Send + Sync>>;
@@ -129,16 +130,17 @@ impl DualChannel {
 
 impl HidppOps for DualChannel {
     fn call_20(&self, dev_idx: u8, feat_idx: u8, func: u8, args: &[u8]) -> Result<[u8; 20], HidppErr> {
+        let fn_sw = ((func & 0x0F) << 4) | SW_ID;
         let mut req = [0u8; 20];
         req[0] = 0x11;
         req[1] = dev_idx;
         req[2] = feat_idx;
-        req[3] = ((func & 0x0F) << 4) | SW_ID;
+        req[3] = fn_sw;
         let n = args.len().min(16);
         req[4..4 + n].copy_from_slice(&args[..n]);
 
-        self.drain();
         for attempt in 0..2 {
+            self.drain();
             {
                 let long = self.long.lock().unwrap_or_else(|p| p.into_inner());
                 long.write(&req).map_err(|e| {
@@ -150,7 +152,7 @@ impl HidppOps for DualChannel {
                     }
                 })?;
             }
-            let deadline = Instant::now() + Duration::from_millis(550);
+            let deadline = Instant::now() + Duration::from_millis(750);
             let mut buf = [0u8; 64];
             loop {
                 if Instant::now() >= deadline {
@@ -164,7 +166,7 @@ impl HidppOps for DualChannel {
                             && buf[1] == dev_idx
                             && buf[2] == 0x8F
                             && buf[3] == feat_idx
-                            && (buf[4] & 0x0F) == SW_ID
+                            && buf[4] == fn_sw
                         {
                             return Err(HidppErr::Hidpp10(buf[5]));
                         }
@@ -173,13 +175,13 @@ impl HidppOps for DualChannel {
                 let lg = self.long.lock().unwrap_or_else(|p| p.into_inner());
                 match lg.read_timeout(&mut buf, 25) {
                     Ok(len) if len >= 20 && buf[0] == 0x11 && buf[1] == dev_idx => {
-                        if buf[2] == 0xFF && buf[3] == feat_idx && (buf[4] & 0x0F) == SW_ID {
+                        if buf[2] == 0xFF && buf[3] == feat_idx && buf[4] == fn_sw {
                             return Err(HidppErr::Hidpp20(buf[5]));
                         }
-                        if buf[2] == 0x8F && buf[3] == feat_idx && (buf[4] & 0x0F) == SW_ID {
+                        if buf[2] == 0x8F && buf[3] == feat_idx && buf[4] == fn_sw {
                             return Err(HidppErr::Hidpp10(buf[5]));
                         }
-                        if buf[2] == feat_idx && (buf[3] & 0x0F) == SW_ID {
+                        if buf[2] == feat_idx && buf[3] == fn_sw {
                             let mut out = [0u8; 20];
                             out.copy_from_slice(&buf[..20]);
                             return Ok(out);
@@ -307,12 +309,12 @@ pub fn decode_report_rate_mask(mask: u16, extended: bool) -> Vec<u32> {
             }
         }
     } else {
-        // 0x8060 bit0=1ms(1000Hz), bit1=2ms(500Hz), bit2=4ms(250Hz), bit3=8ms(125Hz)
+        // 0x8060 bit N = (N + 1) ms: bit0=1ms(1000Hz), bit1=2ms(500Hz), bit3=4ms(250Hz), bit7=8ms(125Hz)
         let map: &[(u8, u32)] = &[
             (1 << 0, 1000),
             (1 << 1, 500),
-            (1 << 2, 250),
-            (1 << 3, 125),
+            (1 << 3, 250),
+            (1 << 7, 125),
         ];
         for (bit, hz) in map {
             if ((mask as u8) & bit) != 0 {
@@ -387,7 +389,7 @@ pub struct ParsedProfile {
     pub stages: Vec<DpiStage>,
     pub buttons: Vec<ButtonAction>,
     pub name: String,
-    pub lighting: Option<LightingState>,
+    pub lighting: Vec<LightingState>,
 }
 
 /// 4 バイトボタンレコード (`union hidpp20_button_binding`) を `ButtonAction` へデコード。
@@ -571,7 +573,7 @@ pub fn decode_led(b: &[u8]) -> LightingState {
             color_correction: None,
         },
         0x03 => {
-            let period = u16::from_be_bytes([b[6], b[7]]).clamp(1000, 20000);
+            let period = u16::from_be_bytes([b[6], b[7]]).clamp(1000, 20000) as u32;
             let bri = if b[8] == 0 { 100 } else { b[8].min(100) };
             let speed = (((20000 - period) * 100) / 19000).clamp(1, 100) as u8;
             LightingState {
@@ -589,7 +591,7 @@ pub fn decode_led(b: &[u8]) -> LightingState {
             }
         }
         0x0A => {
-            let period = u16::from_be_bytes([b[4], b[5]]).clamp(1000, 20000);
+            let period = u16::from_be_bytes([b[4], b[5]]).clamp(1000, 20000) as u32;
             let bri = if b[7] == 0 { 100 } else { b[7].min(100) };
             let speed = (((20000 - period) * 100) / 19000).clamp(1, 100) as u8;
             LightingState {
@@ -657,27 +659,30 @@ pub fn encode_led(ls: &LightingState) -> [u8; 11] {
     out
 }
 
-/// 256B `hidpp20_internal_profile` セクタをパースする。
+/// 255B/256B `hidpp20_internal_profile` セクタをパースする。
 pub fn parse_profile_sector(
     sector: u16,
     enabled: bool,
     raw: &[u8],
     button_count: usize,
-    has_lighting: bool,
+    led_count: usize,
+    check_crc: bool,
 ) -> HubResult<ParsedProfile> {
-    if raw.len() < 256 {
+    if raw.len() < 254 {
         return Err(HubError::Protocol(format!(
             "logitech: profile sector {} too short ({}B)",
             sector,
             raw.len()
         )));
     }
-    let stored_crc = u16::from_be_bytes([raw[raw.len() - 2], raw[raw.len() - 1]]);
-    let calc_crc = crc16_ccitt_false(&raw[..raw.len() - 2]);
-    if stored_crc != calc_crc {
-        return Err(HubError::Protocol(format!(
-            "logitech: sector 0x{sector:04X} CRC mismatch (stored={stored_crc:#06x} calc={calc_crc:#06x})"
-        )));
+    if check_crc {
+        let stored_crc = u16::from_be_bytes([raw[raw.len() - 2], raw[raw.len() - 1]]);
+        let calc_crc = crc16_ccitt_false(&raw[..raw.len() - 2]);
+        if stored_crc != calc_crc {
+            return Err(HubError::Protocol(format!(
+                "logitech: sector 0x{sector:04X} CRC mismatch (stored={stored_crc:#06x} calc={calc_crc:#06x})"
+            )));
+        }
     }
 
     let rr_div = raw[0].max(1) as u32;
@@ -722,11 +727,11 @@ pub fn parse_profile_sector(
         String::from_utf8_lossy(&name_slice[..end]).trim().to_string()
     };
 
-    let lighting = if has_lighting {
-        Some(decode_led(&raw[208..219]))
-    } else {
-        None
-    };
+    let mut lighting = Vec::with_capacity(led_count.min(2));
+    for z in 0..led_count.min(2) {
+        let off = 208 + z * 11;
+        lighting.push(decode_led(&raw[off..off + 11]));
+    }
 
     Ok(ParsedProfile {
         sector,
@@ -742,11 +747,12 @@ pub fn parse_profile_sector(
     })
 }
 
-/// 変更内容を RMW してセクタバイト列を生成し、末尾 2 バイトに CRC-16/CCITT-FALSE を書き込む。
-pub fn serialize_profile_sector(p: &ParsedProfile, has_lighting: bool) -> Vec<u8> {
+/// 変更内容を RMW して `sector_size` バイト列を生成し、末尾 2 バイトに CRC-16/CCITT-FALSE を書き込む。
+pub fn serialize_profile_sector(p: &ParsedProfile, sector_size: usize, led_count: usize) -> Vec<u8> {
+    let target_len = sector_size.max(254);
     let mut buf = p.raw.clone();
-    if buf.len() < 256 {
-        buf.resize(256, 0xFF);
+    if buf.len() != target_len {
+        buf.resize(target_len, 0xFF);
     }
     let rr = (1000 / p.report_rate_hz.max(125)).clamp(1, 8) as u8;
     buf[0] = rr;
@@ -772,17 +778,19 @@ pub fn serialize_profile_sector(p: &ParsedProfile, has_lighting: bool) -> Vec<u8
         buf[160..160 + n].copy_from_slice(&name_bytes[..n]);
     }
 
-    if has_lighting {
-        if let Some(ls) = &p.lighting {
-            let led = encode_led(ls);
-            buf[208..219].copy_from_slice(&led);
-            buf[230..241].copy_from_slice(&led);
+    let n_leds = led_count.min(2).min(p.lighting.len());
+    for z in 0..n_leds {
+        let led = encode_led(&p.lighting[z]);
+        let off = 208 + z * 11;
+        let alt_off = 230 + z * 11;
+        buf[off..off + 11].copy_from_slice(&led);
+        if n_leds >= 2 || buf[alt_off] != 0xFF {
+            buf[alt_off..alt_off + 11].copy_from_slice(&led);
         }
     }
 
-    let len = buf.len();
-    let crc = crc16_ccitt_false(&buf[..len - 2]);
-    buf[len - 2..len].copy_from_slice(&crc.to_be_bytes());
+    let crc = crc16_ccitt_false(&buf[..target_len - 2]);
+    buf[target_len - 2..target_len].copy_from_slice(&crc.to_be_bytes());
     buf
 }
 
@@ -792,7 +800,7 @@ pub fn build_directory_sector(sector_size: usize, enabled_flags: &[bool]) -> Vec
     let mut buf = vec![0xFFu8; sz];
     let mut off = 0usize;
     for (i, &en) in enabled_flags.iter().enumerate() {
-        if off + 4 >= sz - 6 {
+        if off + 8 > sz - 2 {
             break;
         }
         buf[off] = 0x00;
@@ -801,10 +809,11 @@ pub fn build_directory_sector(sector_size: usize, enabled_flags: &[bool]) -> Vec
         buf[off + 3] = 0x00;
         off += 4;
     }
-    if off + 3 <= sz - 2 {
+    if off + 4 <= sz - 2 {
         buf[off] = 0xFF;
         buf[off + 1] = 0xFF;
         buf[off + 2] = 0x00;
+        buf[off + 3] = 0x00;
     }
     let crc = crc16_ccitt_false(&buf[..sz - 2]);
     buf[sz - 2..sz].copy_from_slice(&crc.to_be_bytes());
@@ -849,6 +858,7 @@ struct FeatTable {
     report_rate: Option<u8>,
     ext_report_rate: Option<u8>,
     color_led: Option<u8>,
+    rgb_led: Option<u8>,
     onboard: Option<u8>,
     desc: Option<OnboardDesc>,
     dpi_min: u32,
@@ -856,6 +866,7 @@ struct FeatTable {
     dpi_step: u32,
     rates: Vec<u32>,
     has_lighting: bool,
+    led_count: usize,
 }
 
 pub struct LogitechMouse {
@@ -998,6 +1009,7 @@ fn probe_features(
                 FEAT_REPORT_RATE => table.report_rate = Some(i),
                 FEAT_EXT_REPORT_RATE => table.ext_report_rate = Some(i),
                 FEAT_COLOR_LED_EFFECTS => table.color_led = Some(i),
+                FEAT_RGB_EFFECTS => table.rgb_led = Some(i),
                 FEAT_ONBOARD_PROFILES => table.onboard = Some(i),
                 _ => {}
             }
@@ -1064,9 +1076,13 @@ fn probe_features(
         }
     }
 
-    if let Some(idx) = table.color_led {
+    if table.rgb_led.is_some() {
+        table.led_count = 2;
+        table.has_lighting = true;
+    } else if let Some(idx) = table.color_led {
         if let Ok(r) = ch.call_20(dev_idx, idx, 0, &[]) {
-            table.has_lighting = r[4] > 0;
+            table.led_count = (r[4] as usize).min(2);
+            table.has_lighting = table.led_count > 0;
         }
     }
 
@@ -1149,30 +1165,36 @@ fn build_caps(ft: Option<&FeatTable>, model: &str) -> Capabilities {
             renamable: true,
         });
         let btn_n = (desc.button_count as usize).clamp(1, 16);
-        let is_gpw = model.contains("gpro") || model.contains("4079") || model.contains("4074");
+        let is_gpw = model.contains("gpro")
+            || model.contains("4079")
+            || model.contains("4074")
+            || model.contains("4086");
         (p, button_names_for(btn_n, is_gpw), 5usize)
     } else {
         (None, vec![], 1usize)
     };
 
-    let lighting = if ft.has_lighting {
-        vec![LightArea {
-            id: 0,
-            name: "ロゴ / LED".into(),
-            effects: vec![
-                LightEffect::new(0x01, "単色").color().still(),
-                LightEffect::new(0x03, "カラーサイクル"),
-                LightEffect::new(0x0A, "呼吸").color(),
-            ],
-            brightness_max: 100,
-            speed_max: 100,
-            directions: vec![],
-            switchable: true,
-            zones: vec![],
-            per_key: false,
-            direct_drive: false,
-            live_readback: false,
-        }]
+    let make_light_area = |id: u8, name: &str| LightArea {
+        id,
+        name: name.into(),
+        effects: vec![
+            LightEffect::new(0x01, "単色").color().still(),
+            LightEffect::new(0x03, "カラーサイクル"),
+            LightEffect::new(0x0A, "呼吸").color(),
+        ],
+        brightness_max: 100,
+        speed_max: 100,
+        directions: vec![],
+        switchable: true,
+        zones: vec![],
+        per_key: false,
+        direct_drive: false,
+        live_readback: false,
+    };
+    let lighting = if ft.led_count >= 2 {
+        vec![make_light_area(0, "ロゴ"), make_light_area(1, "ホイール")]
+    } else if ft.led_count == 1 {
+        vec![make_light_area(0, "ロゴ / LED")]
     } else {
         vec![]
     };
@@ -1382,41 +1404,53 @@ impl LogitechMouse {
         let pcnt = (desc.profile_count as usize).max(1);
         let btn_n = (desc.button_count as usize).clamp(1, 16);
 
-        let mut from_rom = false;
+        let mut any_rom = false;
         let entries = match self.read_sector(ft, ob_idx, 0x0000, desc.sector_size) {
             Ok(dir_raw) => match parse_directory_sector(&dir_raw, pcnt) {
                 Ok(e) if !e.is_empty() => e,
                 _ => {
-                    from_rom = true;
+                    any_rom = true;
                     vec![]
                 }
             },
             Err(_) => {
-                from_rom = true;
+                any_rom = true;
                 vec![]
             }
         };
 
         let mut profiles = Vec::with_capacity(pcnt);
-        if !from_rom {
-            for i in 0..pcnt {
-                let (sector, enabled) = entries.get(i).copied().unwrap_or((0x0101 + i as u16, false));
-                let raw = self.read_sector(ft, ob_idx, sector, desc.sector_size)?;
-                profiles.push(parse_profile_sector(sector, enabled, &raw, btn_n, ft.has_lighting)?);
+        let oob = desc.profile_count_oob as usize;
+        for i in 0..pcnt {
+            let target_sec = (i + 1) as u16;
+            if !entries.is_empty() {
+                if let Some(&(sector, enabled)) = entries.get(i) {
+                    if let Ok(raw) = self.read_sector(ft, ob_idx, sector, desc.sector_size) {
+                        if let Ok(p) = parse_profile_sector(
+                            sector,
+                            enabled,
+                            &raw,
+                            btn_n,
+                            ft.led_count,
+                            true,
+                        ) {
+                            profiles.push(p);
+                            continue;
+                        }
+                    }
+                }
             }
-        } else {
-            let oob = desc.profile_count_oob as usize;
-            for i in 0..pcnt {
-                let rom_sec = 0x0100 + if i < oob { (i + 1) as u16 } else { 1 };
-                let raw = self.read_sector(ft, ob_idx, rom_sec, desc.sector_size)?;
-                profiles.push(parse_profile_sector(
-                    (i + 1) as u16,
-                    i == 0,
-                    &raw,
-                    btn_n,
-                    ft.has_lighting,
-                )?);
-            }
+            any_rom = true;
+            let rom_sec = 0x0100 + if i < oob { (i + 1) as u16 } else { 1 };
+            let raw = self.read_sector(ft, ob_idx, rom_sec, desc.sector_size)?;
+            profiles.push(parse_profile_sector(
+                target_sec,
+                i == 0,
+                &raw,
+                btn_n,
+                ft.led_count,
+                false,
+            )?);
         }
 
         let active_idx = self
@@ -1430,33 +1464,40 @@ impl LogitechMouse {
             })
             .unwrap_or(0);
 
-        Ok((profiles, active_idx, from_rom))
+        Ok((profiles, active_idx, any_rom))
     }
 
     fn commit_profile(&self, ft: &FeatTable, ob_idx: u8, desc: &OnboardDesc, mut profiles: Vec<ParsedProfile>, active: usize, was_rom: bool) -> HubResult<()> {
         self.ensure_onboard_mode(ft, ob_idx)?;
-        if was_rom {
-            // 初回ユーザー書き込み時は全プロファイルを 0x0001.. へ書き、ディレクトリ 0x0000 を作成
+        let sec_sz = desc.sector_size as usize;
+        let was_enabled = profiles[active].enabled;
+        profiles[active].sector = (active + 1) as u16;
+        profiles[active].enabled = true;
+
+        if was_rom || !was_enabled {
             let mut flags = Vec::with_capacity(profiles.len());
-            for (i, p) in profiles.iter_mut().enumerate() {
-                p.sector = (i + 1) as u16;
-                if i == active {
-                    p.enabled = true;
+            if was_rom {
+                for (i, p) in profiles.iter_mut().enumerate() {
+                    p.sector = (i + 1) as u16;
+                    flags.push(p.enabled);
+                    let data = serialize_profile_sector(p, sec_sz, ft.led_count);
+                    self.write_sector(ft, ob_idx, p.sector, &data)?;
                 }
-                flags.push(p.enabled);
-                let data = serialize_profile_sector(p, ft.has_lighting);
-                self.write_sector(ft, ob_idx, p.sector, &data)?;
+            } else {
+                for p in &profiles {
+                    flags.push(p.enabled);
+                }
+                let data = serialize_profile_sector(&profiles[active], sec_sz, ft.led_count);
+                self.write_sector(ft, ob_idx, profiles[active].sector, &data)?;
             }
-            let dir = build_directory_sector(desc.sector_size as usize, &flags);
+            let dir = build_directory_sector(sec_sz, &flags);
             self.write_sector(ft, ob_idx, 0x0000, &dir)?;
             self.ch
                 .call_20(ft.dev_idx, ob_idx, 3, &[0x00, (active + 1) as u8])
                 .map_err(HubError::from)?;
         } else {
-            let p = &mut profiles[active];
-            p.enabled = true;
-            let data = serialize_profile_sector(p, ft.has_lighting);
-            self.write_sector(ft, ob_idx, p.sector, &data)?;
+            let data = serialize_profile_sector(&profiles[active], sec_sz, ft.led_count);
+            self.write_sector(ft, ob_idx, profiles[active].sector, &data)?;
         }
         *self.state_cache.lock().unwrap_or_else(|p| p.into_inner()) =
             Some((profiles, active, false));
@@ -1494,8 +1535,8 @@ impl DeviceDriver for LogitechMouse {
                 SettingValue::Choice(p.report_rate_hz as i64),
             );
             let mut lighting = BTreeMap::new();
-            if let Some(ls) = &p.lighting {
-                lighting.insert(0, ls.clone());
+            for (idx, ls) in p.lighting.iter().enumerate() {
+                lighting.insert(idx as u8, ls.clone());
             }
 
             return Ok(DeviceState {
@@ -1592,6 +1633,9 @@ impl DeviceDriver for LogitechMouse {
                 Change::Profile(idx) => {
                     let p = (*idx as usize).min(profiles.len().saturating_sub(1));
                     self.ensure_onboard_mode(&ft, ob_idx)?;
+                    if was_rom || !profiles[p].enabled {
+                        return self.commit_profile(&ft, ob_idx, &desc, profiles, p, was_rom);
+                    }
                     self.ch
                         .call_20(ft.dev_idx, ob_idx, 3, &[0x00, (p + 1) as u8])
                         .map_err(HubError::from)?;
@@ -1627,9 +1671,13 @@ impl DeviceDriver for LogitechMouse {
                     profiles[active_idx].report_rate_hz = value.as_choice().max(125) as u32;
                     return self.commit_profile(&ft, ob_idx, &desc, profiles, active_idx, was_rom);
                 }
-                Change::Lighting { state, .. } if ft.has_lighting => {
-                    profiles[active_idx].lighting = Some(state.clone());
-                    return self.commit_profile(&ft, ob_idx, &desc, profiles, active_idx, was_rom);
+                Change::Lighting { area, state } if ft.has_lighting => {
+                    let zi = *area as usize;
+                    if zi < profiles[active_idx].lighting.len() {
+                        profiles[active_idx].lighting[zi] = state.clone();
+                        return self.commit_profile(&ft, ob_idx, &desc, profiles, active_idx, was_rom);
+                    }
+                    return Err(HubError::Unsupported("lighting area"));
                 }
                 _ => return Err(HubError::Unsupported("change")),
             }
@@ -1687,7 +1735,7 @@ impl DeviceDriver for LogitechMouse {
             let flags = r[6];
             Battery {
                 percent: Some(mv_to_percent(mv)),
-                charging: (flags & 0x80) != 0 && (flags & 0x07) != 0,
+                charging: (flags & 0x80) != 0 && (flags & 0x07) <= 3,
             }
         } else {
             return Err(HubError::Unsupported("battery"));
@@ -1754,7 +1802,7 @@ mod tests {
         let crc = crc16_ccitt_false(&raw[..254]);
         raw[254..256].copy_from_slice(&crc.to_be_bytes());
 
-        let mut parsed = parse_profile_sector(1, true, &raw, 6, true).unwrap();
+        let mut parsed = parse_profile_sector(1, true, &raw, 6, 1, true).unwrap();
         assert_eq!(parsed.report_rate_hz, 1000);
         assert_eq!(parsed.stages.len(), 3);
         assert_eq!(parsed.stages[1].x, 800);
@@ -1764,23 +1812,60 @@ mod tests {
             ButtonAction::Key(KeyStroke { mods: 0x01, usage: 0x04 })
         );
         assert_eq!(parsed.buttons[3], ButtonAction::Dpi(DpiFn::Cycle));
-        assert_eq!(parsed.lighting.as_ref().unwrap().color, Rgb::new(0x12, 0x34, 0x56));
+        assert_eq!(parsed.lighting[0].color, Rgb::new(0x12, 0x34, 0x56));
 
         parsed.report_rate_hz = 500;
         parsed.stages[1].x = 1200;
-        let out = serialize_profile_sector(&parsed, true);
+        let out = serialize_profile_sector(&parsed, 256, 1);
+        assert_eq!(out.len(), 256);
         assert_eq!(out[20], 0x5A);
         assert_eq!(out[100], 0xA5);
         assert_eq!(out[0], 2);
-        let reparsed = parse_profile_sector(1, true, &out, 6, true).unwrap();
+        let reparsed = parse_profile_sector(1, true, &out, 6, 1, true).unwrap();
         assert_eq!(reparsed.report_rate_hz, 500);
         assert_eq!(reparsed.stages[1].x, 1200);
     }
 
     #[test]
+    fn profile_sector_255_bytes_dual_led_and_rom_no_crc() {
+        let mut raw = vec![0xFFu8; 255];
+        raw[0] = 1; // 1000 Hz
+        raw[1] = 1; // default DPI idx 1
+        raw[2] = 0;
+        raw[3..5].copy_from_slice(&400u16.to_le_bytes());
+        raw[5..7].copy_from_slice(&800u16.to_le_bytes());
+        raw[208..219].copy_from_slice(&[0x03, 0, 0, 0, 0, 0, 0x1F, 0x40, 0x64, 0, 0]);
+        raw[219..230].copy_from_slice(&[0x03, 0, 0, 0, 0, 0, 0x1F, 0x40, 0x64, 0, 0]);
+        raw[230..241].copy_from_slice(&[0x03, 0, 0, 0, 0, 0, 0x1F, 0x40, 0x32, 0, 0]);
+        raw[241..252].copy_from_slice(&[0x03, 0, 0, 0, 0, 0, 0x1F, 0x40, 0x32, 0, 0]);
+        // ROM セクタ (末尾 0xFF 0xFF で CRC 未設定) を check_crc=false で読めること
+        let mut parsed = parse_profile_sector(1, true, &raw, 6, 2, false).unwrap();
+        assert_eq!(parsed.lighting.len(), 2);
+        assert_eq!(parsed.lighting[0].effect, 0x03);
+        assert_eq!(parsed.lighting[1].brightness, 100);
+
+        parsed.report_rate_hz = 250;
+        let out = serialize_profile_sector(&parsed, 255, 2);
+        assert_eq!(out.len(), 255);
+        assert_eq!(out[0], 4);
+        let stored = u16::from_be_bytes([out[253], out[254]]);
+        assert_eq!(stored, crc16_ccitt_false(&out[..253]));
+        let reparsed = parse_profile_sector(1, true, &out, 6, 2, true).unwrap();
+        assert_eq!(reparsed.report_rate_hz, 250);
+    }
+
+    #[test]
+    fn report_rate_mask_0x8060_real_hardware() {
+        assert_eq!(decode_report_rate_mask(0x8B, false), vec![125, 250, 500, 1000]);
+    }
+
+    #[test]
     fn directory_sector_roundtrip() {
-        let dir = build_directory_sector(256, &[true, false, true]);
-        let parsed = parse_directory_sector(&dir, 5).unwrap();
-        assert_eq!(parsed, vec![(1, true), (2, false), (3, true)]);
+        for sz in [255usize, 256] {
+            let dir = build_directory_sector(sz, &[true, false, true]);
+            assert_eq!(dir.len(), sz);
+            let parsed = parse_directory_sector(&dir, 5).unwrap();
+            assert_eq!(parsed, vec![(1, true), (2, false), (3, true)]);
+        }
     }
 }

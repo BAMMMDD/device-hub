@@ -278,7 +278,7 @@ pub const KNOWN: &[KnownDevice] = &[
         name: "LIGHTSPEED レシーバー",
         transport: Transport::Wireless24G,
         driver: DriverKind::Logitech,
-        verified: false,
+        verified: true,
     },
     KnownDevice {
         vid: 0x046D,
@@ -291,7 +291,7 @@ pub const KNOWN: &[KnownDevice] = &[
         name: "LIGHTSPEED レシーバー",
         transport: Transport::Wireless24G,
         driver: DriverKind::Logitech,
-        verified: false,
+        verified: true,
     },
     KnownDevice {
         vid: 0x046D,

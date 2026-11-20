@@ -16,7 +16,7 @@
 | HTX Ultra | 33E4:5608, 5617, 5618, 5619 | FF02 / 02 (推定) | Mousefit | www.mouse.fit | 機種表から登録 / 未検証 |
 | ATK F1 Ultimate | 未確定 | 未確定 | 未確定 | (mouse.fit の機種表に無い) | §7 を参照 |
 | Razer DeathAdder V4 Pro | 1532:00BF (無線) / 00BE (有線) | 0001 / 02 | Razer (`razer.rs`) | — | **v2 実機検証済 (0x00BF)** (DPI/ポーリング/電源/ドングルLED/電池) |
-| Logitech HID++ 2.0 マウス | 046D:C53F 他レシーバー / C088 等有線 | FF00 / 02 (+01) | Logitech (`logitech.rs`) | — | HID++ 2.0 動的 Feature + `0x8100` オンボードプロファイル |
+| Logitech HID++ 2.0 マウス | 046D:C53F (G304) / C539 (G703 HERO) 他レシーバー / C088 等有線 | FF00 / 02 (+01) | Logitech (`logitech.rs`) | — | **v2 実機検証済 (0xC53F G304 / 0xC539 G703 HERO)** (DPI/ポーリング/ボタン/照明/電池/`0x8100` オンボード 255B) |
 
 **接続方式でプロトコルが変わる点に注意**: mouse.fit の新プロトコル (64B feature report) は
 有線機種専用 — 8K ドングルは Windows の feature report を一切持たず、ドングル経由は

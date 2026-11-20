@@ -116,19 +116,21 @@ impl DualChannel {
         func: u8,
         args: &[u8],
     ) -> Result<[u8; 20], ProbeErr> {
+        let fn_sw = ((func & 0x0F) << 4) | SW_ID;
         let mut req = [0u8; 20];
         req[0] = 0x11;
         req[1] = dev_idx;
         req[2] = feat_idx;
-        req[3] = ((func & 0x0F) << 4) | SW_ID;
+        req[3] = fn_sw;
         let n = args.len().min(16);
         req[4..4 + n].copy_from_slice(&args[..n]);
 
         for attempt in 0..2 {
+            self.drain();
             self.long
                 .write(&req)
                 .map_err(|e| ProbeErr::Io(format!("write: {e}")))?;
-            let deadline = Instant::now() + Duration::from_millis(500);
+            let deadline = Instant::now() + Duration::from_millis(800);
             loop {
                 if Instant::now() >= deadline {
                     break;
@@ -138,7 +140,7 @@ impl DualChannel {
                 if let Some(s) = &self.short {
                     if let Ok(len) = s.read_timeout(&mut buf, 10) {
                         if len >= 6 && buf[0] == 0x10 && buf[1] == dev_idx {
-                            if buf[2] == 0x8F && buf[3] == feat_idx && (buf[4] & 0x0F) == SW_ID {
+                            if buf[2] == 0x8F && buf[3] == feat_idx && buf[4] == fn_sw {
                                 return Err(ProbeErr::Hidpp10(buf[5]));
                             }
                             println!("  [short rx len={len}] {}", hex(&buf[..len]));
@@ -149,13 +151,13 @@ impl DualChannel {
                 }
                 match self.long.read_timeout(&mut buf, 50) {
                     Ok(len) if len >= 20 && buf[0] == 0x11 && buf[1] == dev_idx => {
-                        if buf[2] == 0xFF && buf[3] == feat_idx && (buf[4] & 0x0F) == SW_ID {
+                        if buf[2] == 0xFF && buf[3] == feat_idx && buf[4] == fn_sw {
                             return Err(ProbeErr::Hidpp20(buf[5]));
                         }
-                        if buf[2] == 0x8F && buf[3] == feat_idx && (buf[4] & 0x0F) == SW_ID {
+                        if buf[2] == 0x8F && buf[3] == feat_idx && buf[4] == fn_sw {
                             return Err(ProbeErr::Hidpp10(buf[5]));
                         }
-                        if buf[2] == feat_idx && (buf[3] & 0x0F) == SW_ID {
+                        if buf[2] == feat_idx && buf[3] == fn_sw {
                             let mut out = [0u8; 20];
                             out.copy_from_slice(&buf[..20]);
                             return Ok(out);
@@ -479,7 +481,7 @@ fn main() {
 
             let mode = ch.call_20(dev_idx, idx, 2, &[]).ok().map(|r| r[4]);
             let cur_prof = ch.call_20(dev_idx, idx, 4, &[]).ok().map(|r| u16::from_be_bytes([r[4], r[5]]));
-            let cur_dpi = ch.call_20(dev_idx, idx, 6, &[]).ok().map(|r| r[4]);
+            let cur_dpi = ch.call_20(dev_idx, idx, 11, &[]).ok().map(|r| r[4]);
             println!(
                 "  mode={mode:?} (1=Onboard, 2=Host) cur_profile={cur_prof:?} ({:#06x}) cur_dpi_idx={cur_dpi:?}",
                 cur_prof.unwrap_or(0)
@@ -487,7 +489,12 @@ fn main() {
 
             let backup_dir = std::env::var_os("APPDATA")
                 .map(PathBuf::from)
-                .map(|p| p.join("DeviceHub").join("backups").join("gpro-wireless"));
+                .map(|p| {
+                    p.join("DeviceHub")
+                        .join("backups")
+                        .join("logitech")
+                        .join(format!("probe_{pid:04x}"))
+                });
             if let Some(dir) = &backup_dir {
                 let _ = fs::create_dir_all(dir);
             }
@@ -508,13 +515,15 @@ fn main() {
                 let mut ok = true;
                 let mut off = 0u16;
                 while off < sec_size {
+                    let read_off = if sec_size - off < 16 { sec_size - 16 } else { off };
                     let s_bytes = sector.to_be_bytes();
-                    let o_bytes = off.to_be_bytes();
+                    let o_bytes = read_off.to_be_bytes();
                     match ch.call_20(dev_idx, idx, 5, &[s_bytes[0], s_bytes[1], o_bytes[0], o_bytes[1]]) {
                         Ok(r) => {
+                            let skip = (off - read_off) as usize;
                             let take = (sec_size - off).min(16) as usize;
-                            data.extend_from_slice(&r[4..4 + take]);
-                            off += 16;
+                            data.extend_from_slice(&r[4 + skip..4 + skip + take]);
+                            off += take as u16;
                         }
                         Err(e) => {
                             println!("  sector 0x{sector:04X} off={off} read err: {e:?}");
