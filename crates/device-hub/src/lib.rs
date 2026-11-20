@@ -12,6 +12,7 @@
 pub mod app;
 pub mod atomic;
 pub mod audio;
+pub mod autostart;
 pub mod cursor;
 pub mod fwstate;
 pub mod glass;
@@ -27,5 +28,6 @@ pub mod procmon;
 pub use devhub_obs::rawinput;
 pub mod store;
 pub mod theme;
+pub mod tray;
 pub mod ui;
 pub mod wallpaper;

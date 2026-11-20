@@ -1104,3 +1104,36 @@ get/set は cmd が +0x80/同一値の関係。`devID` はプロファイル番�
 - 公式の日本語表示名: 移動同期 / 直線補正 / リップル / LOD / ガラスモード / 20K FPS / 競技モード / 角度調整 /
   スリープ時間 / スクロールBhop / ホイール応答時間 / デバウンスタイム / 高速トリガー / ドングルLED (信号) /
   プロファイルをリセット / 完全初期化。X-Y軸分離は DPI タブの X/Y 切り替えで扱う (設定行には出さない)。
+
+---
+
+## 6. Razer DeathAdder V4 Pro (90B Feature Report — OpenRazer 準拠 + 実機確認済み)
+
+2026-11-20 実機 `1532:00BF` (ワイヤレス) を `razerprobe` で読み取り検証済み:
+
+- **HID インターフェース**: `if=0 up=0001 u=02`（Windows `hidapi` では先頭に Report ID `0x00` を付けた 91B バッファで `send_feature_report` / `get_feature_report` が応答）。
+- **フレーム構造 (90B)**: `[0]=status (req=0x00, busy=0x01, ok=0x02, timeout=0x04)`, `[1]=tx_id (0x1F)`, `[2..4]=remaining (0x0000)`, `[4]=protocol_type (0x00)`, `[5]=data_size`, `[6]=command_class`, `[7]=command_id`, `[8..88]=arguments[80]`, `[88]=XOR(bytes 2..88)`, `[89]=0x00`。
+- **確認コマンド**:
+  - `0x00/0x81` (`size=0x02`): FW バージョン (`v{args[0]}.{args[1]}` — 実機 `v1.20`)
+  - `0x00/0x82` (`size=0x16`): シリアル文字列 ASCII
+  - `0x00/0xC0` / `0x00/0x40` (`size=0x01`/`0x02`): Polling Rate 2 (`0x01=8000, 0x02=4000, 0x04=2000, 0x08=1000, 0x10=500, 0x20=250, 0x40=125` Hz)。書き込みは OpenRazer PR #2657 通り `arg[0]=0x00` と `0x01` を 2 回送信
+  - `0x04/0x85` / `0x04/0x05` (`size=0x07`): 現在 DPI XY (`store=VARSTORE(0x01)`, `args[1..3]`=BE16 X, `args[3..5]`=BE16 Y)
+  - `0x04/0x86` / `0x04/0x06` (`size=0x26`): DPI ステージ一括 (`args[0]=0x01`, `args[1]=active 1-based`, `args[2]=count`, 以降 7B×count `[stage_id 1-based, x_hi, x_lo, y_hi, y_lo, 0, 0]`)
+  - `0x07/0x80` (`size=0x02`): バッテリー残量 (`args[1]` 0..=255 → `%`) / `0x07/0x84`: 充電状態 (`args[1] != 0`)
+  - `0x07/0x83` / `0x07/0x03` (`size=0x02`): スリープ時間 (BE16 秒: `60..=900` s)
+  - `0x07/0x81` / `0x07/0x01` (`size=0x01`): 低バッテリー閾値 (`0x0C..=0x4D`)
+  - `0x07/0x95` / `0x07/0x15` (`size=0x03`): HyperPolling ドングル 3 連インジケーター LED (`left, center, right`: `0=Off, 1=Battery, 2=Connection, 3=Polling, 4=DPI`)
+
+---
+
+## 7. Logitech HID++ 2.0 汎用ドライバ (0x8100 Onboard Profiles)
+
+Open-source `libratbag` (`hidpp20.c`) 仕様および Windows `046D:C53F` 実機プローブ知見に基づく設計:
+
+- **Windows デュアルチャネル**: `0xFF00:0x02` (Long 20B, Report ID `0x11`) と `0xFF00:0x01` (Short 7B, Report ID `0x10`) を同時オープン。Windows では Long 宛てコマンドの受信機側エラー `0x8F`（スリープ中 `ERR_RESOURCE_ERROR = 0x09` 等）が **Short チャネルへ返る**ため、両方を監視する。
+- **レシーバーレジスタ (`dev_idx=0xFF`)**: HID++ 1.0 `0x81/0xF1` (ドングル FW)、`0x83/0xB5` (`0x20`→WPID、`0x40`→ペア機種名 ASCII — 実機で WPID `0x4074` = `"G304"` 取得確認)。
+- **動的 Feature 検出 (`IRoot 0x0000` → `IFeatureSet 0x0001`)**:
+  - `0x0003` DeviceFwInfo / `0x0005` DeviceName / `0x1004` UnifiedBattery / `0x1000` BatteryStatus / `0x1001` BatteryVoltage
+  - `0x2201` AdjustableDPI (`getSensorDpiList` の `0xE000 | step` マーカーまたは離散リストから機種固有の min/max/step を取得)
+  - `0x8060` / `0x8061` ReportRate / `0x8070` ColorLedEffects
+  - `0x8100` OnboardProfiles (256B セクタ RMW + CRC-16/CCITT-FALSE, `dpi[5]` LE16@3, `buttons[16]` 4B@32, `name` 48B@160, `leds[2]` 11B@208, `crc` BE16@254)。ディレクトリセクタ `0x0000` 未書込みの G304/G305 クワーク時は ROM `0x0101..` へフォールバックし、初回書込み時にユーザーセクタ + ディレクトリを生成する。

@@ -50,8 +50,17 @@ pub struct Prefs {
     /// 再接続・ポート変更でアドレスが変わってもこれで再解決する。
     #[serde(default)]
     pub usb_pick: String,
+    /// 閉じるボタンで終了せずタスクトレイに常駐する。
+    #[serde(default = "default_true")]
+    pub minimize_to_tray: bool,
+    /// Windows 起動時に自動起動する。
+    #[serde(default = "default_true")]
+    pub start_with_windows: bool,
 }
 
+fn default_true() -> bool {
+    true
+}
 fn default_usb_hub() -> u16 {
     1
 }
@@ -166,6 +175,8 @@ impl Default for Prefs {
             usb_ep: default_usb_ep(),
             usb_report: default_usb_report(),
             usb_pick: String::new(),
+            minimize_to_tray: true,
+            start_with_windows: true,
         }
     }
 }

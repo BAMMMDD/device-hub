@@ -72,6 +72,10 @@ pub enum DriverKind {
     Atk,
     /// www.lamzu.net / Aurora 系 (64B feature report、if2 FFFF:00)。
     Lamzu,
+    /// Logitech HID++ 2.0 系 (G PRO Wireless / G304 / G703 等、0xFF00:0x02/0x01)。
+    Logitech,
+    /// Razer 90B Feature Report 系 (DeathAdder V4 Pro 等)。
+    Razer,
     /// 未割り当て (検出だけできる)。
     Unsupported,
 }

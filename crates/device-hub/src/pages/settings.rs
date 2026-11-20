@@ -260,6 +260,61 @@ impl Shell {
                 )),
         );
 
+        let resident = ui::card_titled("常駐・起動", "power", None).child(
+            ui::body()
+                .pb(px(12.))
+                .child(ui::row_first(
+                    "Windows 起動時に自動起動",
+                    Some("サインイン時にタスクトレイへ常駐起動します (--background)"),
+                    ui::toggle(
+                        "start-with-win",
+                        crate::autostart::is_enabled(),
+                        cx,
+                        |this, on, cx| {
+                            match crate::autostart::set_enabled(on) {
+                                Ok(()) => {
+                                    this.prefs.start_with_windows = on;
+                                    this.prefs.save();
+                                }
+                                Err(e) => {
+                                    this.toast(format!("自動起動の設定に失敗しました: {e}"), true, cx);
+                                }
+                            }
+                            cx.notify();
+                        },
+                    ),
+                ))
+                .child(ui::row(
+                    "閉じるボタンでタスクトレイに常駐",
+                    Some("× ボタンで終了せずトレイに格納してプロセス監視・設定維持を続けます"),
+                    ui::toggle(
+                        "min-to-tray",
+                        self.prefs.minimize_to_tray,
+                        cx,
+                        |this, on, cx| {
+                            this.prefs.minimize_to_tray = on;
+                            this.prefs.save();
+                            crate::tray::set_minimize_to_tray(on);
+                            cx.notify();
+                        },
+                    ),
+                ))
+                .child(ui::row(
+                    "完全に終了",
+                    Some("タスクトレイからも含めて Device HUB を終了します"),
+                    ui::button(
+                        "tray-quit",
+                        "終了",
+                        Some("power"),
+                        Btn::Glass,
+                        cx,
+                        |_this, _, _cx| {
+                            crate::tray::request_quit();
+                        },
+                    ),
+                )),
+        );
+
         let about = ui::card_titled("このアプリについて", "info", None).child(
             ui::body()
                 .pb(px(14.))
@@ -285,6 +340,7 @@ impl Shell {
                     .child(ui::title("アプリ設定"))
                     .child(ui::grid2(vec![
                         look.into_any_element(),
+                        resident.into_any_element(),
                         backend.into_any_element(),
                         fw.into_any_element(),
                         about.into_any_element(),

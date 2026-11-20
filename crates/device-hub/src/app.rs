@@ -2016,12 +2016,13 @@ impl Shell {
             MEMORY_PRIORITY_BELOW_NORMAL, MEMORY_PRIORITY_INFORMATION, MEMORY_PRIORITY_NORMAL,
             ProcessMemoryPriority,
         };
-        use windows::Win32::UI::WindowsAndMessaging::IsIconic;
+        use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindowVisible};
         if self.hwnd == 0 {
             return;
         }
         let iconic = unsafe { IsIconic(HWND(self.hwnd as _)).as_bool() };
-        let inactive = iconic || !self.last_window_active;
+        let visible = unsafe { IsWindowVisible(HWND(self.hwnd as _)).as_bool() };
+        let inactive = iconic || !visible || !self.last_window_active;
         unsafe {
             let trim = || {
                 let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
@@ -2042,7 +2043,7 @@ impl Shell {
                     self.mem_ticks = 0;
                 }
                 self.mem_ticks += 1;
-                if iconic || self.mem_ticks >= 30 {
+                if iconic || !visible || self.mem_ticks >= 30 {
                     self.mem_ticks = 0;
                     trim();
                 }

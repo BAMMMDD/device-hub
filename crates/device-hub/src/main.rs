@@ -22,6 +22,10 @@ use gpui_kit::component::{Theme, ThemeMode, TitleBar};
 use gpui_kit::*;
 
 fn main() {
+    if !device_hub::tray::acquire_single_instance() {
+        return;
+    }
+    let start_hidden = std::env::args().any(|a| a == "--background" || a == "--tray");
     device_hub::rawinput::start(); // 実測ポーリングレート計測 (Raw Input)
     // USB 計測ワーカーの診断ログ — 未設定なら %TEMP% に既定で出す
     // (切断の OS コード採取用。ワーカー遷移のみで容量は微小)。
@@ -36,7 +40,7 @@ fn main() {
     }
     gpui_kit::application()
         .with_assets(gpui_kit::assets::AllAssets)
-        .run(|cx| {
+        .run(move |cx| {
             gpui_kit::init(cx);
             // フォント登録は選択の後 — 使う書体だけ載せて常駐メモリを削る。
             let prefs = Prefs::load();
@@ -64,18 +68,33 @@ fn main() {
             options.window_min_size = Some(size(px(1040.), px(640.)));
             // 背面に回ったら描画を間引く (ゲームの邪魔をしない)。
             options.inactive_frame_interval = Some(std::time::Duration::from_millis(250));
+            options.focus = !start_hidden;
             options.app_id = Some("devicehub".into());
             // 窓キャプション — タスクマネージャーと Alt+Tab の表示名になる。
             if let Some(tb) = options.titlebar.as_mut() {
                 tb.title = Some("Device HUB".into());
             }
 
-            gpui_kit::open_window(options, cx, |window, cx| {
+            let min_to_tray = prefs.minimize_to_tray;
+            gpui_kit::open_window(options, cx, move |window, cx| {
+                #[cfg(windows)]
+                let hwnd = {
+                    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                    match HasWindowHandle::window_handle(window).map(|h| h.as_raw()) {
+                        Ok(RawWindowHandle::Win32(h)) => h.hwnd.get(),
+                        _ => 0,
+                    }
+                };
+                #[cfg(not(windows))]
+                let hwnd = 0isize;
+                device_hub::tray::init(hwnd, start_hidden, min_to_tray);
+                window.on_window_should_close(cx, |_, _| device_hub::tray::should_close_window());
                 cx.new(|cx| Shell::new(window, cx))
             })
             .expect("failed to open window");
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
+                    device_hub::tray::shutdown();
                     cx.quit();
                 }
             })
